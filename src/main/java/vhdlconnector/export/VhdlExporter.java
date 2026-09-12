@@ -3,6 +3,8 @@ package vhdlconnector.export;
 import vhdlconnector.model.*;
 
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Generates a VHDL entity + architecture that instantiates every placed instance
  *  and wires them together according to the project's connections. */
@@ -53,14 +55,26 @@ public class VhdlExporter {
             }
         }
 
-        // net type/width: take from the first endpoint we can resolve a Port for
+        // net type/width: take from the first endpoint we can resolve a Port for. An
+        // instance port's type may reference the entity's own generics (e.g.
+        // "std_logic_vector(WIDTH-1 downto 0)") - WIDTH only exists in that instance's own
+        // generic map, not in the architecture's declarative region, so it must be
+        // substituted with that instance's actual (overridden or default) generic value
+        // before it can be used for a `signal` declaration here.
         Map<Endpoint, String> netType = new LinkedHashMap<>();
         for (List<Endpoint> net : nets.values()) {
             if (net.size() < 2) continue;
             String type = "std_logic";
+            String firstType = null;
+            boolean mismatch = false;
             for (Endpoint e : net) {
-                Port p = project.resolvePort(e);
-                if (p != null) { type = p.type; break; }
+                String resolved = resolveEndpointType(project, e, result.warnings);
+                if (resolved == null) continue;
+                if (firstType == null) { type = resolved; firstType = resolved; }
+                else if (!resolved.equalsIgnoreCase(firstType)) mismatch = true;
+            }
+            if (mismatch) {
+                result.warnings.add("Net containing " + net.get(0) + " has mismatched resolved types (e.g. '" + firstType + "') - check generic-dependent widths line up");
             }
             for (Endpoint e : net) netType.put(e, type);
         }
@@ -79,6 +93,11 @@ public class VhdlExporter {
                 }
             }
         }
+
+        // ---------- library clauses ----------
+        sb.append("library ieee;\n");
+        sb.append("use ieee.std_logic_1164.all;\n");
+        sb.append("use ieee.numeric_std.all;\n\n");
 
         // ---------- entity ----------
         sb.append("entity ").append(project.topEntityName).append(" is\n");
@@ -188,6 +207,122 @@ public class VhdlExporter {
 
         result.vhdl = sb.toString();
         return result;
+    }
+
+    /** The endpoint's port type with any of its owning entity's generics substituted by
+     *  that specific instance's actual value (its generic map override, or the entity's
+     *  own default if not overridden), then numerically evaluated (e.g. "16-1 downto 0"
+     *  becomes "15 downto 0") so it reads cleanly and, just as importantly, so two ports
+     *  that are really the same width but got there via different generic values/arithmetic
+     *  compare equal instead of triggering a false "mismatched width" warning. External
+     *  ports have no generics but are normalized the same way for that comparison to work
+     *  uniformly. Returns null if the endpoint can't be resolved at all. */
+    private String resolveEndpointType(Project project, Endpoint e, List<String> warnings) {
+        if (e.kind == Endpoint.Kind.EXTERNAL) {
+            ExternalPort ep = project.getExternalPort(e.portName);
+            return ep != null ? normalizeVectorWidth(ep.type) : null;
+        }
+        Instance inst = project.getInstance(e.instanceId);
+        if (inst == null) return null;
+        VhdlEntity entity = project.getEntityForInstance(inst);
+        if (entity == null) return null;
+        Port port = entity.getPort(e.portName);
+        if (port == null) return null;
+        return normalizeVectorWidth(substituteGenerics(port.type, entity, inst, warnings));
+    }
+
+    private static final Pattern VECTOR_TYPE_PATTERN = Pattern.compile(
+            "std_logic_vector\\s*\\(\\s*(.+?)\\s+downto\\s+0\\s*\\)", Pattern.CASE_INSENSITIVE);
+
+    /** Evaluates the high-bit expression of a std_logic_vector(...) type if it's a plain
+     *  integer arithmetic expression (as a generic-width port's usually is once its generic
+     *  names have been substituted with literal values), replacing it with the computed
+     *  number. Leaves the type untouched if it isn't in that shape or won't evaluate. */
+    private String normalizeVectorWidth(String type) {
+        Matcher m = VECTOR_TYPE_PATTERN.matcher(type.trim());
+        if (!m.matches()) return type;
+        Integer high = evalIntExpr(m.group(1));
+        return high != null ? ("std_logic_vector(" + high + " downto 0)") : type;
+    }
+
+    /** Evaluates a simple integer arithmetic expression (+, -, *, /, parentheses), or
+     *  returns null if it isn't one (e.g. still contains an unresolved identifier). */
+    private static Integer evalIntExpr(String expr) {
+        try {
+            IntExprParser parser = new IntExprParser(expr);
+            int value = parser.parseExpr();
+            parser.skipWs();
+            return parser.atEnd() ? value : null;
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    private static final class IntExprParser {
+        private final String s;
+        private int pos = 0;
+        IntExprParser(String s) { this.s = s; }
+
+        boolean atEnd() { return pos >= s.length(); }
+        void skipWs() { while (pos < s.length() && Character.isWhitespace(s.charAt(pos))) pos++; }
+
+        int parseExpr() {
+            int v = parseTerm();
+            while (true) {
+                skipWs();
+                if (pos < s.length() && s.charAt(pos) == '+') { pos++; v += parseTerm(); }
+                else if (pos < s.length() && s.charAt(pos) == '-') { pos++; v -= parseTerm(); }
+                else return v;
+            }
+        }
+
+        int parseTerm() {
+            int v = parseFactor();
+            while (true) {
+                skipWs();
+                if (pos < s.length() && s.charAt(pos) == '*') { pos++; v *= parseFactor(); }
+                else if (pos < s.length() && s.charAt(pos) == '/') { pos++; v /= parseFactor(); }
+                else return v;
+            }
+        }
+
+        int parseFactor() {
+            skipWs();
+            if (pos < s.length() && s.charAt(pos) == '(') {
+                pos++;
+                int v = parseExpr();
+                skipWs();
+                if (pos >= s.length() || s.charAt(pos) != ')') throw new RuntimeException("expected ')'");
+                pos++;
+                return v;
+            }
+            if (pos < s.length() && s.charAt(pos) == '-') { pos++; return -parseFactor(); }
+            int start = pos;
+            while (pos < s.length() && Character.isDigit(s.charAt(pos))) pos++;
+            if (start == pos) throw new RuntimeException("expected a number at " + pos);
+            return Integer.parseInt(s.substring(start, pos));
+        }
+    }
+
+    private String substituteGenerics(String type, VhdlEntity entity, Instance inst, List<String> warnings) {
+        String result = type;
+        for (GenericParam g : entity.generics) {
+            if (!containsWord(result, g.name)) continue;
+            String value = inst.genericOverrides.get(g.name);
+            if (value == null) value = g.defaultValue;
+            if (value == null) {
+                warnings.add("Generic '" + g.name + "' on instance '" + inst.id + "' has no override and no default - "
+                        + "'" + type + "' will reference an undefined identifier in the generated VHDL");
+                continue;
+            }
+            Pattern p = Pattern.compile("\\b" + Pattern.quote(g.name) + "\\b", Pattern.CASE_INSENSITIVE);
+            result = p.matcher(result).replaceAll(Matcher.quoteReplacement(value));
+        }
+        return result;
+    }
+
+    private boolean containsWord(String text, String word) {
+        return Pattern.compile("\\b" + Pattern.quote(word) + "\\b", Pattern.CASE_INSENSITIVE).matcher(text).find();
     }
 
     private Endpoint find(Map<Endpoint, Endpoint> parent, Endpoint e) {
