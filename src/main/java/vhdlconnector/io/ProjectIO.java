@@ -155,11 +155,12 @@ public class ProjectIO {
         m.put("id", c.id);
         m.put("a", endpointToJson(c.a));
         m.put("b", endpointToJson(c.b));
+        m.put("isBus", c.isBus);
         return m;
     }
 
     private Connection connectionFromJson(Map<String, Object> m) {
-        return new Connection(Json.str(m, "id", "conn"), endpointFromJson(Json.obj(m.get("a"))), endpointFromJson(Json.obj(m.get("b"))));
+        return new Connection(Json.str(m, "id", "conn"), endpointFromJson(Json.obj(m.get("a"))), endpointFromJson(Json.obj(m.get("b"))), Json.bool(m, "isBus", false));
     }
 
     private Map<String, Object> endpointToJson(Endpoint e) {

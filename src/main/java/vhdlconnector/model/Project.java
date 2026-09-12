@@ -100,6 +100,14 @@ public class Project {
         return p != null && p.canReceive();
     }
 
+
+    public boolean isEndpointAlreadyConnected(Endpoint e) {
+        for (Connection c : connections) {
+            if (c.touches(e)) return true;
+        }
+        return false;
+    }
+
     public boolean isEndpointAlreadyConnected(Endpoint a, Endpoint b) {
         for (Connection c : connections) {
             if ((c.a.equals(a) && c.b.equals(b)) || (c.a.equals(b) && c.b.equals(a))) return true;

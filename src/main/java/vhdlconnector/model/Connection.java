@@ -4,11 +4,13 @@ public class Connection {
     public String id;
     public Endpoint a;
     public Endpoint b;
+    public boolean isBus;
 
-    public Connection(String id, Endpoint a, Endpoint b) {
+    public Connection(String id, Endpoint a, Endpoint b, boolean isBus) {
         this.id = id;
         this.a = a;
         this.b = b;
+        this.isBus = isBus;
     }
 
     public boolean touches(Endpoint e) {

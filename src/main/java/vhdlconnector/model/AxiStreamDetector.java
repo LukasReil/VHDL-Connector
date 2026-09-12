@@ -24,8 +24,14 @@ public final class AxiStreamDetector {
     /** Returns detected groups, in first-appearance order. A group needs at least 2
      *  recognized AXI-Stream signals to be treated as an interface. */
     public static List<PortGroup> detectGroups(VhdlEntity entity) {
+        return detectGroups(entity.ports);
+    }
+
+    /** Same detection, but over any flat list of ports/pseudo-ports (used for both an
+     *  entity's ports and a project's external top-level ports). */
+    public static List<PortGroup> detectGroups(List<Port> ports) {
         Map<String, PortGroup> groups = new LinkedHashMap<>();
-        for (Port p : entity.ports) {
+        for (Port p : ports) {
             Matcher m = SIGNAL_PATTERN.matcher(p.name);
             if (!m.matches()) continue;
             String prefix = m.group(1);
@@ -38,6 +44,13 @@ public final class AxiStreamDetector {
             if (g.signals.size() >= 2) result.add(g);
         }
         return result;
+    }
+
+    /** The AXI-Stream interface prefix a port name belongs to (e.g. "s_axis" for
+     *  "s_axis_tdata"), or null if the name doesn't match the convention at all. */
+    public static String prefixOf(String portName) {
+        Matcher m = SIGNAL_PATTERN.matcher(portName);
+        return m.matches() ? m.group(1) : null;
     }
 
     /** Ports that are not part of any detected group. */

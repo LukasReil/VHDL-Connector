@@ -7,6 +7,7 @@ import java.awt.*;
 import java.awt.event.*;
 import java.awt.geom.Line2D;
 import java.awt.geom.Point2D;
+import java.awt.geom.Rectangle2D;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -26,15 +27,18 @@ public class CanvasPanel extends JPanel {
     private static final int PIN_BOTTOM_PAD = 10;
     private static final int MIN_BOX_WIDTH = 150;
     private static final double PIN_HIT_RADIUS = 7;
-    private static final double EXT_PORT_HIT_RADIUS = 9;
+    private static final double EXT_PORT_HIT_RADIUS = 9;   // grab the diamond body/label to move it
+    private static final double EXT_WIRE_HIT_RADIUS = 5;   // must click closer to the tip to start a wire
     private static final double CONN_HIT_DIST = 5;
 
     private Project project;
     private Listener listener;
+    private final Map<String, List<Point2D>> routedPaths = new java.util.HashMap<>(); // connection id -> routed polyline
+    private final List<Connection> visualConnections = new ArrayList<>(); // one representative per drawn wire (a whole AXI-Stream bundle collapses to one)
 
     // drag state
     private Instance draggingInstance;
-    private ExternalPort draggingExternalPort;
+    private List<ExternalPort> draggingExternalPorts; // all members of the pin being dragged (1 for a plain port)
     private double dragOffsetX, dragOffsetY;
 
     private boolean draggingWire;
@@ -42,6 +46,8 @@ public class CanvasPanel extends JPanel {
     private Point wireCurrentPoint;
 
     private Object selectedItem; // Instance | ExternalPort | Connection | null
+
+    private OrthogonalRouter router = new OrthogonalRouter();
 
     public CanvasPanel() {
         setBackground(new Color(250, 250, 252));
@@ -83,7 +89,7 @@ public class CanvasPanel extends JPanel {
         this.project = project;
         selectedItem = null;
         draggingInstance = null;
-        draggingExternalPort = null;
+        draggingExternalPorts = null;
         draggingWire = false;
         layoutChanged();
     }
@@ -93,6 +99,7 @@ public class CanvasPanel extends JPanel {
     }
 
     private void changed() {
+        recomputeRoutes(computeRoutingBounds());
         if (listener != null) listener.onProjectChanged();
         repaint();
     }
@@ -102,21 +109,95 @@ public class CanvasPanel extends JPanel {
     }
 
     public void layoutChanged() {
-        int maxX = 1600, maxY = 1000;
+        Rectangle2D bounds = computeRoutingBounds();
+        recomputeRoutes(bounds);
+        setPreferredSize(new Dimension((int) bounds.getWidth(), (int) bounds.getHeight()));
+        revalidate();
+        repaint();
+    }
+
+    private Rectangle2D computeRoutingBounds() {
+        double maxX = 1600, maxY = 1000;
+        double minX = 0, minY = 0;
         if (project != null) {
             for (Instance inst : project.instances) {
                 InstanceBox box = computeBox(inst);
-                maxX = Math.max(maxX, (int) (box.x + box.width) + 200);
-                maxY = Math.max(maxY, (int) (box.y + box.height) + 200);
+                maxX = Math.max(maxX, box.x + box.width + 200);
+                maxY = Math.max(maxY, box.y + box.height + 200);
+                minX = Math.min(minX, box.x - 200);
+                minY = Math.min(minY, box.y - 200);
             }
             for (ExternalPort p : project.externalPorts) {
-                maxX = Math.max(maxX, (int) p.x + 200);
-                maxY = Math.max(maxY, (int) p.y + 200);
+                maxX = Math.max(maxX, p.x + 200);
+                maxY = Math.max(maxY, p.y + 200);
+                minX = Math.min(minX, p.x - 200);
+                minY = Math.min(minY, p.y - 200);
             }
         }
-        setPreferredSize(new Dimension(maxX, maxY));
-        revalidate();
-        repaint();
+        return new Rectangle2D.Double(minX, minY, maxX - minX, maxY - minY);
+    }
+
+    /** Routes every connection on an obstacle-avoiding grid. An AXI-Stream bundle (several
+     *  signals wired between the same two interfaces) is routed and drawn as a single wire,
+     *  since it's connected/disconnected as one unit - drawing every underlying signal
+     *  separately just produced N routes from independent searches that could legitimately
+     *  differ (equally-short paths, different tie-breaks), which looked inconsistent even
+     *  though they start/end at the same coincident pin. Everything else is grouped by
+     *  driver pin so signals fanning out from the same source still share a trunk. */
+    private void recomputeRoutes(Rectangle2D bounds) {
+        routedPaths.clear();
+        visualConnections.clear();
+        if (project == null) return;
+
+        router.reset();
+
+        List<Rectangle2D> obstacles = new ArrayList<>();
+        for (Instance inst : project.instances) {
+            InstanceBox box = computeBox(inst);
+            obstacles.add(new Rectangle2D.Double(box.x, box.y, box.width, box.height));
+        }
+
+        java.util.Set<Connection> handled = new java.util.HashSet<>();
+
+        // AXI-Stream bundles: one route stands in for every signal in the bundle
+        for (Connection c : project.connections) {
+            if (handled.contains(c)) continue;
+            List<Connection> bundle = bundleFor(c);
+            if (bundle.size() <= 1) continue;
+            handled.addAll(bundle);
+            Point2D p1 = resolveEndpointPoint(c.a);
+            Point2D p2 = resolveEndpointPoint(c.b);
+            if (p1 == null || p2 == null) continue;
+            List<Point2D> path = router.route(p1, java.util.Collections.singletonList(p2), obstacles, bounds).get(0);
+            for (Connection member : bundle) routedPaths.put(member.id, path);
+            visualConnections.add(bundle.get(0));
+        }
+
+        // everything else, grouped by driver pin so fan-outs share a trunk
+        Map<Endpoint, List<Connection>> bySource = new java.util.LinkedHashMap<>();
+        Map<Connection, Endpoint> destOf = new java.util.HashMap<>();
+        for (Connection c : project.connections) {
+            if (handled.contains(c)) continue;
+            boolean aDrives = project.canDrive(c.a);
+            Endpoint src = aDrives ? c.a : c.b;
+            Endpoint dst = aDrives ? c.b : c.a;
+            bySource.computeIfAbsent(src, k -> new ArrayList<>()).add(c);
+            destOf.put(c, dst);
+        }
+
+        for (Map.Entry<Endpoint, List<Connection>> e : bySource.entrySet()) {
+            Point2D sourcePoint = resolveEndpointPoint(e.getKey());
+            if (sourcePoint == null) continue;
+            List<Connection> conns = e.getValue();
+            List<Point2D> destPoints = new ArrayList<>();
+            for (Connection c : conns) {
+                Point2D dp = resolveEndpointPoint(destOf.get(c));
+                destPoints.add(dp != null ? dp : sourcePoint);
+            }
+            List<List<Point2D>> paths = router.route(sourcePoint, destPoints, obstacles, bounds);
+            for (int i = 0; i < conns.size(); i++) routedPaths.put(conns.get(i).id, paths.get(i));
+            visualConnections.addAll(conns);
+        }
     }
 
     public void addInstanceAtDefaultPosition(String entityName) {
@@ -132,19 +213,69 @@ public class CanvasPanel extends JPanel {
         changed();
     }
 
-    public void addExternalPortAt(ExternalPort template, Point p) {
-        if (project == null) return;
-        String name = template.name;
-        if (project.getExternalPort(name) != null) {
-            int n = 2;
-            while (project.getExternalPort(name + n) != null) n++;
-            name = name + n;
-        }
-        ExternalPort port = new ExternalPort(name, template.direction, template.type, p.x, p.y);
-        project.externalPorts.add(port);
-        selectedItem = port;
+    /** Adds one or more freshly created external ports (a plain port is a singleton list,
+     *  an AXI-Stream interface is several), renaming them if needed to avoid collisions. */
+    private void addExternalPortsAt(List<ExternalPort> ports) {
+        if (project == null || ports.isEmpty()) return;
+        ensureUniqueNames(ports);
+        project.externalPorts.addAll(ports);
+        selectedItem = ports.size() == 1 ? ports.get(0) : null;
         layoutChanged();
         changed();
+    }
+
+    /** Replaces an existing external port or AXI-Stream group with a freshly (re)configured
+     *  one, preserving connections for any signal name that survives the edit unchanged and
+     *  dropping connections for names that disappeared. */
+    private void editExternalPorts(List<ExternalPort> oldMembers, List<ExternalPort> newMembers) {
+        java.util.Set<String> oldNames = new java.util.HashSet<>();
+        for (ExternalPort p : oldMembers) oldNames.add(p.name);
+        project.externalPorts.removeIf(p -> oldNames.contains(p.name));
+
+        ensureUniqueNames(newMembers);
+
+        java.util.Set<String> newNames = new java.util.HashSet<>();
+        for (ExternalPort p : newMembers) newNames.add(p.name);
+        for (String old : oldNames) {
+            if (!newNames.contains(old)) project.removeConnectionsTouching(Endpoint.external(old));
+        }
+
+        project.externalPorts.addAll(newMembers);
+        selectedItem = null;
+        layoutChanged();
+        changed();
+    }
+
+    /** Renames ports so none of their names collide with existing external ports. A
+     *  multi-port (AXI-Stream) list is renamed as a whole, keeping every member's shared
+     *  prefix in sync, rather than letting individual signals drift out of the bundle. */
+    private void ensureUniqueNames(List<ExternalPort> ports) {
+        if (ports.size() > 1) {
+            String prefix = AxiStreamDetector.prefixOf(ports.get(0).name);
+            if (prefix != null) {
+                String candidate = prefix;
+                int n = 2;
+                while (true) {
+                    final String cp = candidate;
+                    final String base = prefix;
+                    boolean collide = ports.stream().anyMatch(p -> project.getExternalPort(cp + p.name.substring(base.length())) != null);
+                    if (!collide) break;
+                    candidate = prefix + "_" + n++;
+                }
+                if (!candidate.equals(prefix)) {
+                    for (ExternalPort p : ports) p.name = candidate + p.name.substring(prefix.length());
+                }
+                return;
+            }
+        }
+        for (ExternalPort p : ports) p.name = uniqueExternalName(p.name);
+    }
+
+    private String uniqueExternalName(String base) {
+        if (project.getExternalPort(base) == null) return base;
+        int n = 2;
+        while (project.getExternalPort(base + n) != null) n++;
+        return base + n;
     }
 
     // ---------------- geometry ----------------
@@ -260,15 +391,36 @@ public class CanvasPanel extends JPanel {
         Graphics2D g2 = (Graphics2D) g;
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-        // connections
-        for (Connection c : project.connections) {
-            Point2D p1 = resolveEndpointPoint(c.a);
-            Point2D p2 = resolveEndpointPoint(c.b);
-            if (p1 == null || p2 == null) continue;
+        // connections (routed around obstacles; signals sharing a driver pin share a trunk;
+        // an AXI-Stream bundle draws as a single wire rather than one per underlying signal)
+        List<Point2D> selectedPath = null;
+        for (Connection c : visualConnections) {
+            List<Point2D> path = routedPaths.get(c.id);
+            if (path == null || path.size() < 2) {
+                Point2D p1 = resolveEndpointPoint(c.a);
+                Point2D p2 = resolveEndpointPoint(c.b);
+                if (p1 == null || p2 == null) continue;
+                path = java.util.Arrays.asList(p1, p2);
+            }
             boolean sel = c == selectedItem;
-            g2.setColor(sel ? new Color(220, 90, 30) : new Color(90, 100, 115));
-            g2.setStroke(new BasicStroke(sel ? 2.4f : 1.6f));
-            drawElbow(g2, p1, p2);
+            if (sel) {
+                selectedPath = path;
+                continue;
+            }
+            if (c.isBus) {
+                g2.setColor(new Color(0, 140, 130));
+                g2.setStroke(new BasicStroke(2.0f));
+            } else {
+                g2.setColor(new Color(90, 100, 115));
+                g2.setStroke(new BasicStroke(1.6f));
+            }
+            drawPolyline(g2, path);
+        }
+
+        if (selectedPath != null) {
+            g2.setColor(new Color(220, 90, 30));
+            g2.setStroke(new BasicStroke(2.4f));
+            drawPolyline(g2, selectedPath);
         }
 
         // rubber-band wire being dragged
@@ -287,18 +439,17 @@ public class CanvasPanel extends JPanel {
         }
 
         // external ports
-        for (ExternalPort p : project.externalPorts) {
-            drawExternalPort(g2, p);
+        for (ExternalPinInfo pin : computeExternalPins()) {
+            if (pin.group != null) drawExternalGroupPin(g2, pin);
+            else drawExternalPort(g2, pin.single);
         }
     }
 
-    private void drawElbow(Graphics2D g2, Point2D p1, Point2D p2) {
-        double midX = (p1.getX() + p2.getX()) / 2.0;
+    private void drawPolyline(Graphics2D g2, List<Point2D> pts) {
         java.awt.geom.GeneralPath path = new java.awt.geom.GeneralPath();
-        path.moveTo(p1.getX(), p1.getY());
-        path.lineTo(midX, p1.getY());
-        path.lineTo(midX, p2.getY());
-        path.lineTo(p2.getX(), p2.getY());
+        Point2D first = pts.get(0);
+        path.moveTo(first.getX(), first.getY());
+        for (int i = 1; i < pts.size(); i++) path.lineTo(pts.get(i).getX(), pts.get(i).getY());
         g2.draw(path);
     }
 
@@ -379,6 +530,24 @@ public class CanvasPanel extends JPanel {
         g2.drawString(label, (float) (p.x + s + 4), (float) (p.y + 4));
     }
 
+    private void drawExternalGroupPin(Graphics2D g2, ExternalPinInfo pin) {
+        boolean sel = pin.group == selectedItem;
+        PortGroup g = pin.group;
+        int s = 9;
+        Color c = new Color(0, 140, 130);
+        java.awt.geom.RoundRectangle2D shape = new java.awt.geom.RoundRectangle2D.Double(pin.x - s, pin.y - s, s * 2, s * 2, 4, 4);
+        g2.setColor(c);
+        g2.fill(shape);
+        g2.setColor(sel ? Color.BLACK : c.darker());
+        g2.setStroke(new BasicStroke(sel ? 2.2f : 1.2f));
+        g2.draw(shape);
+
+        g2.setFont(g2.getFont().deriveFont(Font.BOLD, 11f));
+        g2.setColor(Color.BLACK);
+        String label = g.name.toUpperCase() + " (" + (g.isMaster() ? "M" : "S") + "-AXIS, " + g.signals.size() + " sig.)";
+        g2.drawString(label, (float) (pin.x + s + 4), (float) (pin.y + 4));
+    }
+
     // ---------------- hit testing ----------------
 
     private Instance hitTestInstance(Point p) {
@@ -390,24 +559,110 @@ public class CanvasPanel extends JPanel {
         return null;
     }
 
-    private ExternalPort hitTestExternalPort(Point p) {
-        for (int i = project.externalPorts.size() - 1; i >= 0; i--) {
-            ExternalPort ep = project.externalPorts.get(i);
-            if (p.distance(ep.x, ep.y) <= EXT_PORT_HIT_RADIUS) return ep;
+    /** A single logical pin among the project's external (top-level) ports: either one
+     *  ordinary port, or a whole detected AXI-Stream interface bundled into one pin. */
+    private static class ExternalPinInfo {
+        ExternalPort single; // non-null for an ordinary (ungrouped) external port
+        PortGroup group;     // non-null for a bundled AXI-Stream external interface
+        double x, y;
+
+        List<ExternalPort> members(Project project) {
+            if (single != null) return java.util.Collections.singletonList(single);
+            List<ExternalPort> result = new ArrayList<>();
+            for (Port p : group.signals.values()) {
+                ExternalPort ep = project.getExternalPort(p.name);
+                if (ep != null) result.add(ep);
+            }
+            return result;
+        }
+    }
+
+    private List<ExternalPinInfo> computeExternalPins() {
+        List<ExternalPinInfo> pins = new ArrayList<>();
+        List<PortGroup> groups = AxiStreamDetector.detectGroups(externalPortsAsProxies());
+        java.util.Set<String> groupedNames = new java.util.HashSet<>();
+        for (PortGroup g : groups) for (Port p : g.signals.values()) groupedNames.add(p.name);
+
+        for (PortGroup g : groups) {
+            ExternalPort anchor = project.getExternalPort(g.signals.values().iterator().next().name);
+            if (anchor == null) continue;
+            ExternalPinInfo info = new ExternalPinInfo();
+            info.group = g;
+            info.x = anchor.x;
+            info.y = anchor.y;
+            pins.add(info);
+        }
+        for (ExternalPort ep : project.externalPorts) {
+            if (groupedNames.contains(ep.name)) continue;
+            ExternalPinInfo info = new ExternalPinInfo();
+            info.single = ep;
+            info.x = ep.x;
+            info.y = ep.y;
+            pins.add(info);
+        }
+        return pins;
+    }
+
+    private List<Port> externalPortsAsProxies() {
+        List<Port> proxies = new ArrayList<>();
+        for (ExternalPort ep : project.externalPorts) proxies.add(new Port(ep.name, ep.direction, ep.type));
+        return proxies;
+    }
+
+    /** The precise tip of the pin - clicking within this radius starts a wire. Deliberately
+     *  tighter than {@link #hitTestExternalPin}, whose looser radius plus the label text
+     *  is the "grab handle" for moving the port (see the class-level note on why these two
+     *  need to be different: a plain external port's whole body IS its wire terminal, so
+     *  without splitting the hit-test, dragging it could never mean anything but "wire"). */
+    private ExternalPinInfo hitTestExternalWirePin(Point p) {
+        for (ExternalPinInfo info : computeExternalPins()) {
+            if (p.distance(info.x, info.y) <= EXT_WIRE_HIT_RADIUS) return info;
         }
         return null;
     }
 
+    /** The port's whole body (diamond + adjacent label) - used for moving, selecting, and
+     *  the right-click menu, all of which should work from anywhere on the visible symbol. */
+    private ExternalPinInfo hitTestExternalPin(Point p) {
+        for (ExternalPinInfo info : computeExternalPins()) {
+            if (p.distance(info.x, info.y) <= EXT_PORT_HIT_RADIUS) return info;
+            if (externalLabelBounds(info).contains(p.x, p.y)) return info;
+        }
+        return null;
+    }
+
+    /** Text label bounds for an external pin, kept in sync with what drawExternalPort /
+     *  drawExternalGroupPin actually draw so the "grab the label" hit-test matches the eye. */
+    private Rectangle2D externalLabelBounds(ExternalPinInfo pin) {
+        FontMetrics fm = getFontMetrics(getFont().deriveFont(Font.BOLD, 11f));
+        String label = pin.group != null
+                ? pin.group.name.toUpperCase() + " (" + (pin.group.isMaster() ? "M" : "S") + "-AXIS, " + pin.group.signals.size() + " sig.)"
+                : pin.single.name + " : " + pin.single.direction.vhdl();
+        int s = pin.group != null ? 9 : 8;
+        double baseline = pin.y + 4;
+        double left = pin.x + s + 4;
+        return new Rectangle2D.Double(left, baseline - fm.getAscent(), fm.stringWidth(label), fm.getAscent() + fm.getDescent());
+    }
+
     /** What a click/drag landed on: either a single wire-able signal (instance port or
-     *  external port) or a whole bundled AXI-Stream interface on an instance. */
+     *  external port) or a whole bundled AXI-Stream interface, on an instance or on the
+     *  project's external (top-level) ports. */
     private class PinTarget {
-        Instance instance;   // set when this pin belongs to an instance
-        Port port;           // non-null for a single-signal pin (instance or external)
-        PortGroup group;      // non-null for a bundled interface pin (instance only)
-        String externalName; // non-null for a single external port pin
+        Instance instance;    // non-null when this pin belongs to an instance; null => external
+        Port port;            // non-null for a single-signal pin on an instance
+        PortGroup group;      // non-null for a bundled interface pin (instance or external)
+        String externalName;  // non-null for a single external port pin
+
+        private String anyMemberName() {
+            return group.signals.values().iterator().next().name;
+        }
 
         Point2D point() {
-            if (group != null) return resolveEndpointPoint(Endpoint.instancePort(instance.id, group.signals.values().iterator().next().name));
+            if (group != null) {
+                return instance != null
+                        ? resolveEndpointPoint(Endpoint.instancePort(instance.id, anyMemberName()))
+                        : resolveEndpointPoint(Endpoint.external(anyMemberName()));
+            }
             if (instance != null) return resolveEndpointPoint(Endpoint.instancePort(instance.id, port.name));
             return resolveEndpointPoint(Endpoint.external(externalName));
         }
@@ -431,10 +686,10 @@ public class CanvasPanel extends JPanel {
             for (PinInfo pin : box.leftPins) if (p.distance(pin.x, pin.y) <= PIN_HIT_RADIUS) return toTarget(inst, pin);
             for (PinInfo pin : box.rightPins) if (p.distance(pin.x, pin.y) <= PIN_HIT_RADIUS) return toTarget(inst, pin);
         }
-        ExternalPort ep = hitTestExternalPort(p);
-        if (ep != null) {
+        ExternalPinInfo extPin = hitTestExternalWirePin(p);
+        if (extPin != null) {
             PinTarget t = new PinTarget();
-            t.externalName = ep.name;
+            if (extPin.group != null) t.group = extPin.group; else t.externalName = extPin.single.name;
             return t;
         }
         return null;
@@ -448,15 +703,14 @@ public class CanvasPanel extends JPanel {
     }
 
     private Connection hitTestConnection(Point p) {
-        for (int i = project.connections.size() - 1; i >= 0; i--) {
-            Connection c = project.connections.get(i);
-            Point2D p1 = resolveEndpointPoint(c.a);
-            Point2D p2 = resolveEndpointPoint(c.b);
-            if (p1 == null || p2 == null) continue;
-            double midX = (p1.getX() + p2.getX()) / 2.0;
-            if (Line2D.ptSegDist(p1.getX(), p1.getY(), midX, p1.getY(), p.x, p.y) <= CONN_HIT_DIST) return c;
-            if (Line2D.ptSegDist(midX, p1.getY(), midX, p2.getY(), p.x, p.y) <= CONN_HIT_DIST) return c;
-            if (Line2D.ptSegDist(midX, p2.getY(), p2.getX(), p2.getY(), p.x, p.y) <= CONN_HIT_DIST) return c;
+        for (int i = visualConnections.size() - 1; i >= 0; i--) {
+            Connection c = visualConnections.get(i);
+            List<Point2D> path = routedPaths.get(c.id);
+            if (path == null || path.size() < 2) continue;
+            for (int j = 0; j + 1 < path.size(); j++) {
+                Point2D a = path.get(j), b = path.get(j + 1);
+                if (Line2D.ptSegDist(a.getX(), a.getY(), b.getX(), b.getY(), p.x, p.y) <= CONN_HIT_DIST) return c;
+            }
         }
         return null;
     }
@@ -482,12 +736,12 @@ public class CanvasPanel extends JPanel {
             return;
         }
 
-        ExternalPort ep = hitTestExternalPort(p);
-        if (ep != null) {
-            draggingExternalPort = ep;
-            dragOffsetX = p.x - ep.x;
-            dragOffsetY = p.y - ep.y;
-            selectedItem = ep;
+        ExternalPinInfo extPin = hitTestExternalPin(p);
+        if (extPin != null) {
+            draggingExternalPorts = extPin.members(project);
+            dragOffsetX = p.x - extPin.x;
+            dragOffsetY = p.y - extPin.y;
+            selectedItem = extPin.group != null ? extPin.group : extPin.single;
             repaint();
             return;
         }
@@ -523,9 +777,10 @@ public class CanvasPanel extends JPanel {
             changed();
             return;
         }
-        if (draggingExternalPort != null) {
-            draggingExternalPort.x = Math.max(0, p.x - dragOffsetX);
-            draggingExternalPort.y = Math.max(0, p.y - dragOffsetY);
+        if (draggingExternalPorts != null) {
+            double nx = Math.max(0, p.x - dragOffsetX);
+            double ny = Math.max(0, p.y - dragOffsetY);
+            for (ExternalPort ep : draggingExternalPorts) { ep.x = nx; ep.y = ny; }
             layoutChanged();
             changed();
         }
@@ -543,13 +798,13 @@ public class CanvasPanel extends JPanel {
             wireCurrentPoint = null;
         }
         draggingInstance = null;
-        draggingExternalPort = null;
+        draggingExternalPorts = null;
         repaint();
     }
 
     private void tryConnect(PinTarget a, PinTarget b) {
         if (a.group != null && b.group != null) {
-            tryConnectGroups(a.instance, a.group, b.instance, b.group);
+            tryConnectGroups(a, b);
             return;
         }
         if (a.group != null || b.group != null) {
@@ -559,6 +814,10 @@ public class CanvasPanel extends JPanel {
         tryConnectSingle(a.toEndpoint(), b.toEndpoint());
     }
 
+    private Endpoint endpointFor(PinTarget t, Port memberPort) {
+        return t.instance != null ? Endpoint.instancePort(t.instance.id, memberPort.name) : Endpoint.external(memberPort.name);
+    }
+
     private void tryConnectSingle(Endpoint a, Endpoint b) {
         if (project.isEndpointAlreadyConnected(a, b)) {
             status("Already connected.");
@@ -566,10 +825,30 @@ public class CanvasPanel extends JPanel {
         }
         boolean ok = (project.canDrive(a) && project.canReceive(b)) || (project.canDrive(b) && project.canReceive(a));
         if (!ok) {
+            if (project.canReceive(a) && project.canReceive(b)) {
+                Endpoint otherA = null;
+                Endpoint otherB = null;
+                for (Connection c : project.connections) {
+                    if (c.a.equals(a) && project.canDrive(c.b)) { otherA = c.b; break; }
+                    if (c.b.equals(a) && project.canDrive(c.a)) { otherA = c.a; break; }
+                    if (c.a.equals(b) && project.canDrive(c.b)) { otherB = c.b; break; }
+                    if (c.b.equals(b) && project.canDrive(c.a)) { otherB = c.a; break; }
+                }
+                if (otherA != null) {
+                    a = otherA;
+                    ok = true;
+                }
+                if (otherB != null) {
+                    b = otherB;
+                    ok = true;
+                }
+            }
+        }
+        if (!ok) {
             status("Incompatible directions: cannot connect " + describeDir(a) + " to " + describeDir(b));
             return;
         }
-        Connection c = new Connection(project.nextConnectionId(), a, b);
+        Connection c = new Connection(project.nextConnectionId(), a, b, false);
         project.connections.add(c);
         selectedItem = c;
         status("Connected " + a + " -- " + b);
@@ -577,11 +856,20 @@ public class CanvasPanel extends JPanel {
     }
 
     /** Wires up every AXI-Stream signal the two interfaces have in common (tdata<->tdata,
-     *  tvalid<->tvalid, ...), rejecting the whole operation if both sides are the same
-     *  role (two masters or two slaves), since that can never be a valid AXI-Stream link. */
-    private void tryConnectGroups(Instance instA, PortGroup groupA, Instance instB, PortGroup groupB) {
-        if (groupA.isMaster() == groupB.isMaster()) {
-            status("Cannot connect two AXI-Stream " + (groupA.isMaster() ? "master" : "slave") + " interfaces together.");
+     *  tvalid<->tvalid, ...), rejecting the whole operation if both sides would drive (or
+     *  both would receive) TVALID, since that can never be a valid AXI-Stream link. Uses
+     *  project.canDrive rather than PortGroup.isMaster() for this check specifically,
+     *  because an external port's driving role is the flip of its declared direction
+     *  (see ExternalPort.canDrive/canReceive) while an instance port's isn't - isMaster()
+     *  alone would wrongly reject a perfectly valid instance-to-external link. */
+    private void tryConnectGroups(PinTarget a, PinTarget b) {
+        PortGroup groupA = a.group, groupB = b.group;
+        Port anchorA = groupA.signals.containsKey("VALID") ? groupA.signals.get("VALID") : groupA.signals.values().iterator().next();
+        Port anchorB = groupB.signals.containsKey("VALID") ? groupB.signals.get("VALID") : groupB.signals.values().iterator().next();
+        boolean aDrives = project.canDrive(endpointFor(a, anchorA));
+        boolean bDrives = project.canDrive(endpointFor(b, anchorB));
+        if (aDrives == bDrives) {
+            status("Cannot connect two AXI-Stream " + (aDrives ? "master" : "slave") + " interfaces together.");
             return;
         }
         int made = 0, skipped = 0;
@@ -593,12 +881,12 @@ public class CanvasPanel extends JPanel {
             Port pa = groupA.signals.get(suffix);
             Port pb = groupB.signals.get(suffix);
             if (pa == null || pb == null) { skipped++; continue; }
-            Endpoint ea = Endpoint.instancePort(instA.id, pa.name);
-            Endpoint eb = Endpoint.instancePort(instB.id, pb.name);
+            Endpoint ea = endpointFor(a, pa);
+            Endpoint eb = endpointFor(b, pb);
             if (project.isEndpointAlreadyConnected(ea, eb)) continue;
             boolean ok = (project.canDrive(ea) && project.canReceive(eb)) || (project.canDrive(eb) && project.canReceive(ea));
             if (!ok) { skipped++; continue; }
-            project.connections.add(new Connection(project.nextConnectionId(), ea, eb));
+            project.connections.add(new Connection(project.nextConnectionId(), ea, eb, true));
             made++;
             madeSuffixes.add(suffix.toLowerCase());
         }
@@ -620,9 +908,14 @@ public class CanvasPanel extends JPanel {
         } else if (selectedItem instanceof ExternalPort) {
             project.removeExternalPort(((ExternalPort) selectedItem).name);
             status("External port deleted.");
+        } else if (selectedItem instanceof PortGroup) {
+            for (Port sig : ((PortGroup) selectedItem).signals.values()) project.removeExternalPort(sig.name);
+            status("AXI-Stream interface deleted.");
         } else if (selectedItem instanceof Connection) {
-            project.removeConnection(((Connection) selectedItem).id);
-            status("Connection deleted.");
+            Connection conn = (Connection) selectedItem;
+            List<Connection> bundle = bundleFor(conn);
+            for (Connection c : bundle) project.removeConnection(c.id);
+            status(bundle.size() > 1 ? "AXI-Stream link deleted (" + bundle.size() + " signals)." : "Connection deleted.");
         } else {
             return;
         }
@@ -636,14 +929,29 @@ public class CanvasPanel extends JPanel {
     private void showContextMenu(MouseEvent e) {
         Point p = e.getPoint();
         Instance inst = hitTestInstance(p);
-        ExternalPort ep = hitTestExternalPort(p);
-        Connection conn = ep == null ? hitTestConnection(p) : null;
+        ExternalPinInfo extPin = hitTestExternalPin(p);
+        Connection conn = extPin == null ? hitTestConnection(p) : null;
 
         JPopupMenu menu = new JPopupMenu();
-        if (ep != null) {
+        if (extPin != null && extPin.group != null) {
+            PortGroup group = extPin.group;
+            selectedItem = group;
+            JMenuItem editItem = new JMenuItem("Edit AXI-Stream Interface...");
+            editItem.addActionListener(a -> editExternalGroup(group));
+            JMenuItem delItem = new JMenuItem("Delete AXI-Stream Interface (" + group.signals.size() + " ports)");
+            delItem.addActionListener(a -> {
+                for (Port sig : group.signals.values()) project.removeExternalPort(sig.name);
+                selectedItem = null;
+                layoutChanged();
+                changed();
+            });
+            menu.add(editItem);
+            menu.add(delItem);
+        } else if (extPin != null) {
+            ExternalPort ep = extPin.single;
             selectedItem = ep;
             JMenuItem editItem = new JMenuItem("Edit External Port...");
-            editItem.addActionListener(a -> editExternalPort(ep));
+            editItem.addActionListener(a -> editExternalPortSingle(ep));
             JMenuItem delItem = new JMenuItem("Delete External Port");
             delItem.addActionListener(a -> { project.removeExternalPort(ep.name); selectedItem = null; layoutChanged(); changed(); });
             menu.add(editItem);
@@ -662,12 +970,11 @@ public class CanvasPanel extends JPanel {
             menu.add(delItem);
         } else if (conn != null) {
             selectedItem = conn;
-            JMenuItem delItem = new JMenuItem("Delete Connection");
-            delItem.addActionListener(a -> { project.removeConnection(conn.id); selectedItem = null; changed(); });
-            menu.add(delItem);
-
             List<Connection> bundle = bundleFor(conn);
             if (bundle.size() > 1) {
+                // this wire represents a whole AXI-Stream link - offer only the bundle-wide
+                // delete, since deleting just the representative signal would silently leave
+                // the other signals connected (a confusing partial-disconnect state)
                 JMenuItem delBundleItem = new JMenuItem("Delete AXI-Stream Link (" + bundle.size() + " signals)");
                 delBundleItem.addActionListener(a -> {
                     for (Connection c : bundle) project.removeConnection(c.id);
@@ -675,12 +982,16 @@ public class CanvasPanel extends JPanel {
                     changed();
                 });
                 menu.add(delBundleItem);
+            } else {
+                JMenuItem delItem = new JMenuItem("Delete Connection");
+                delItem.addActionListener(a -> { project.removeConnection(conn.id); selectedItem = null; changed(); });
+                menu.add(delItem);
             }
         } else {
             JMenuItem addItem = new JMenuItem("Add External Port Here...");
             addItem.addActionListener(a -> {
-                ExternalPort created = Dialogs.promptExternalPort(this, null);
-                if (created != null) addExternalPortAt(created, p);
+                List<ExternalPort> created = Dialogs.promptNewExternalPort(this, p.x, p.y);
+                if (created != null) addExternalPortsAt(created);
             });
             menu.add(addItem);
         }
@@ -707,31 +1018,31 @@ public class CanvasPanel extends JPanel {
         }
     }
 
-    private void editExternalPort(ExternalPort ep) {
-        String oldName = ep.name;
-        ExternalPort edited = Dialogs.promptExternalPort(this, ep);
-        if (edited == null) return;
-        if (!edited.name.equals(oldName) && project.getExternalPort(edited.name) != null) {
-            JOptionPane.showMessageDialog(this, "An external port named '" + edited.name + "' already exists.", "Name conflict", JOptionPane.ERROR_MESSAGE);
-            return;
+    private void editExternalPortSingle(ExternalPort ep) {
+        List<ExternalPort> edited = Dialogs.promptExternalPort(this, ep);
+        if (edited != null) editExternalPorts(java.util.Collections.singletonList(ep), edited);
+    }
+
+    private void editExternalGroup(PortGroup group) {
+        List<ExternalPort> oldMembers = new ArrayList<>();
+        for (Port sig : group.signals.values()) {
+            ExternalPort ep = project.getExternalPort(sig.name);
+            if (ep != null) oldMembers.add(ep);
         }
-        ep.name = edited.name;
-        ep.direction = edited.direction;
-        ep.type = edited.type;
-        if (!oldName.equals(ep.name)) {
-            for (Connection c : project.connections) {
-                if (c.a.kind == Endpoint.Kind.EXTERNAL && c.a.portName.equals(oldName)) c.a.portName = ep.name;
-                if (c.b.kind == Endpoint.Kind.EXTERNAL && c.b.portName.equals(oldName)) c.b.portName = ep.name;
-            }
-        }
-        layoutChanged();
-        changed();
+        if (oldMembers.isEmpty()) return;
+        List<ExternalPort> edited = Dialogs.promptAxiStreamGroup(this, group, oldMembers.get(0).x, oldMembers.get(0).y);
+        if (edited != null) editExternalPorts(oldMembers, edited);
     }
 
     // ---------------- AXI-Stream bundle helpers ----------------
 
     private PortGroup groupOfEndpoint(Endpoint e) {
-        if (e.kind != Endpoint.Kind.INSTANCE) return null;
+        if (e.kind == Endpoint.Kind.EXTERNAL) {
+            for (PortGroup g : AxiStreamDetector.detectGroups(externalPortsAsProxies())) {
+                for (Port p : g.signals.values()) if (p.name.equalsIgnoreCase(e.portName)) return g;
+            }
+            return null;
+        }
         Instance inst = project.getInstance(e.instanceId);
         if (inst == null) return null;
         VhdlEntity entity = project.getEntityForInstance(inst);
@@ -742,24 +1053,33 @@ public class CanvasPanel extends JPanel {
         return null;
     }
 
-    private boolean endpointInGroup(Endpoint e, String instId, PortGroup g) {
-        if (e.kind != Endpoint.Kind.INSTANCE || !e.instanceId.equals(instId)) return false;
+    private Instance ownerOf(Endpoint e) {
+        return e.kind == Endpoint.Kind.INSTANCE ? project.getInstance(e.instanceId) : null;
+    }
+
+    /** owner == null means "external"; otherwise the endpoint must belong to that instance. */
+    private boolean endpointOwnedBy(Endpoint e, Instance owner, PortGroup g) {
+        if (owner == null) {
+            if (e.kind != Endpoint.Kind.EXTERNAL) return false;
+        } else if (e.kind != Endpoint.Kind.INSTANCE || !e.instanceId.equals(owner.id)) {
+            return false;
+        }
         for (Port p : g.signals.values()) if (p.name.equalsIgnoreCase(e.portName)) return true;
         return false;
     }
 
-    /** All connections that belong to the same instance-to-instance AXI-Stream link as conn
-     *  (i.e. every individual signal wired between the same pair of interfaces). Returns just
-     *  {conn} if either endpoint isn't part of a detected group. */
+    /** All connections that belong to the same AXI-Stream link as conn (i.e. every individual
+     *  signal wired between the same pair of interfaces, whether on instances or external
+     *  ports). Returns just {conn} if either endpoint isn't part of a detected group. */
     private List<Connection> bundleFor(Connection conn) {
         PortGroup ga = groupOfEndpoint(conn.a);
         PortGroup gb = groupOfEndpoint(conn.b);
         if (ga == null || gb == null) return java.util.Collections.singletonList(conn);
-        String instA = conn.a.instanceId, instB = conn.b.instanceId;
+        Instance ownerA = ownerOf(conn.a), ownerB = ownerOf(conn.b);
         List<Connection> result = new ArrayList<>();
         for (Connection c : project.connections) {
-            boolean direct = endpointInGroup(c.a, instA, ga) && endpointInGroup(c.b, instB, gb);
-            boolean swapped = endpointInGroup(c.a, instB, gb) && endpointInGroup(c.b, instA, ga);
+            boolean direct = endpointOwnedBy(c.a, ownerA, ga) && endpointOwnedBy(c.b, ownerB, gb);
+            boolean swapped = endpointOwnedBy(c.a, ownerB, gb) && endpointOwnedBy(c.b, ownerA, ga);
             if (direct || swapped) result.add(c);
         }
         return result;

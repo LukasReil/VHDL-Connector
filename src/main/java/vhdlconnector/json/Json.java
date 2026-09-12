@@ -255,6 +255,11 @@ public final class Json {
         return v == null ? def : v.toString();
     }
 
+    public static boolean bool(Map<String, Object> o, String key, boolean def) {
+        Object v = o.get(key);
+        return v == null ? def : (Boolean) v;
+    }
+
     public static double num(Map<String, Object> o, String key, double def) {
         Object v = o.get(key);
         return v == null ? def : ((Number) v).doubleValue();
