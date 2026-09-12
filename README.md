@@ -15,25 +15,48 @@ small built-in reader/writer).
   whole folder) — the entity name, generics, and ports are parsed straight out
   of the `entity ... is ... end entity;` declaration.
 - **Canvas-based block design**: drag entities from the library onto the
-  canvas, drag instances around, and connect ports by dragging from one pin to
-  another.
+  canvas, drag instances (and external ports) around, and connect ports by
+  dragging from one pin to another. Wires are auto-routed at right angles
+  around instance boxes rather than drawn straight through them, and signals
+  fanning out from the same source pin (e.g. a shared `clk`) share a common
+  trunk instead of being drawn as separate overlapping lines.
 - **Automatic AXI4-Stream grouping**: ports named `<prefix>_axis_t<signal>` or
   `<prefix>_axi_t<signal>` (e.g. `s_axis_tdata`/`s_axis_tvalid`/`s_axis_tready`/
   `s_axis_tlast`, or `m_axi_tdata`/...) are detected and collapsed into a
   single bundled interface pin (`S_AXIS`/`M_AXIS`), so you drag one wire
-  instead of four. Connecting two interfaces wires every matching signal at
-  once and rejects invalid master-to-master / slave-to-slave connections.
-- **External (top-level) ports**: add ports for the entity that will be
-  generated, with a name, direction, and VHDL type.
+  instead of several. This applies both to ports coming from imported entities
+  *and* to external (top-level) ports you create yourself. Connecting two
+  interfaces wires every matching signal at once, rejects invalid
+  master-to-master / slave-to-slave connections, and the whole bundle behaves
+  as a single wire on the canvas (one thicker line, one "delete the whole
+  link" action) instead of one line per underlying signal.
+- **External (top-level) ports**, created via a dialog with a type-specific
+  form:
+  - `std_logic` — just a direction.
+  - `std_logic_vector` — direction + a bit-width field.
+  - `AXI4-Stream` — a role (slave/input or master/output), a data width, and
+    checkboxes (with width fields where relevant) to include `TLAST`,
+    `TKEEP`, `TSTRB`, `TID`, `TDEST`, `TUSER`; this generates and bundles the
+    whole interface's ports at once, same as an imported AXI-Stream entity
+    port.
+  - `Custom...` — a free-text VHDL type, for anything not covered above.
 - **Generics**: override an instance's generic values from the canvas.
 - **Direction-checked wiring**: the tool won't let you connect two outputs or
   two inputs together.
 - **Save/Open projects** as a self-contained `.json` file — the full library
   (including parsed port/generic data) is embedded, so re-opening a project
   doesn't require the original `.vhd` files to still be around.
-- **Export VHDL**: generates a top-level entity + architecture with component
-  declarations, signal declarations, instantiations, and port maps for
-  everything on the canvas.
+- **Export VHDL**: generates a top-level entity + architecture (with the
+  necessary `library ieee; use ieee.std_logic_1164.all; use
+  ieee.numeric_std.all;` clauses) containing component declarations, signal
+  declarations, instantiations, and port maps for everything on the canvas.
+  Generic-dependent port widths (e.g. a port typed
+  `std_logic_vector(WIDTH-1 downto 0)`) are resolved per-instance — using that
+  instance's generic-map override, or the entity's own default otherwise —
+  and evaluated down to a concrete literal, so the generated signal
+  declarations are always valid VHDL rather than referencing an
+  out-of-scope generic name. A width mismatch between two connected ports (or
+  a generic with neither an override nor a default) is reported as a warning.
 
 ## Requirements
 
@@ -60,32 +83,37 @@ java -cp out vhdlconnector.Main
    pull in every `.vhd`/`.vhdl` file under a directory). Parsed entities show
    up in the **Entity Library** panel on the left.
 2. Select an entity and click **Add to Canvas** (or double-click it) to place
-   an instance. Drag the instance around the canvas to position it.
+   an instance. Drag the instance around the canvas to position it — wires
+   attached to it reroute automatically around other instances.
 3. **Wire ports together** by dragging from one pin to another:
    - Blue pins are inputs, orange pins are outputs, purple pins are inout.
-   - Teal square pins are bundled AXI-Stream interfaces (`S_AXIS`/`M_AXIS`);
-     hover over one to see the signals it bundles. Drag from one interface pin
-     to a compatible one (master → slave) to wire all matching signals at
-     once.
+   - Teal square pins are bundled AXI-Stream interfaces (`S_AXIS`/`M_AXIS`,
+     on instances and on external ports alike); hover over one to see the
+     signals it bundles. Drag from one interface pin to a compatible one
+     (master → slave) to wire all matching signals at once, drawn as a
+     single thicker teal wire.
    - Incompatible connections (output-to-output, input-to-input, or two
      AXI-Stream interfaces with the same role) are rejected with a message in
      the status bar.
 4. **Right-click** an instance, external port, or wire for more actions:
    rename an instance's instantiation label, edit its generics, edit/delete an
-   external port, or delete a connection (a bundled AXI-Stream link offers a
-   one-click "delete all N signals" option too).
+   external port or AXI-Stream interface, or delete a connection (deleting a
+   bundled AXI-Stream link removes every signal in it at once).
 5. **Right-click empty canvas** to add a new external (top-level) port at that
-   position.
-6. **Edit > Set Top Entity Name...** sets the name of the entity that will be
+   position — pick its type (`std_logic`, `std_logic_vector`, `AXI4-Stream`,
+   or `Custom...`) in the dialog that appears.
+6. External ports can be dragged anywhere on the canvas, just like instances;
+   clicking precisely on the pin tip instead starts a wire.
+7. **Edit > Set Top Entity Name...** sets the name of the entity that will be
    generated on export.
-7. **File > Save Project / Save Project As...** writes the whole design
+8. **File > Save Project / Save Project As...** writes the whole design
    (library + instances + wiring) to a `.json` file. **File > Open Project...**
    reloads it later.
-8. **File > Export VHDL...** writes out the generated top-level entity and
+9. **File > Export VHDL...** writes out the generated top-level entity and
    architecture, ready to add to your VHDL sources.
 
 Press **Delete** to remove whatever is currently selected (instance, external
-port, or connection).
+port, AXI-Stream interface, or connection/link).
 
 ## Project structure
 
@@ -98,8 +126,10 @@ src/main/java/vhdlconnector/
             from VHDL source
   json/     Minimal dependency-free JSON reader/writer
   io/       ProjectIO — saves/loads a Project as JSON
-  export/   VhdlExporter — generates the instantiated, wired VHDL output
-  gui/      MainFrame, LibraryPanel, CanvasPanel, Dialogs — the Swing UI
+  export/   VhdlExporter — generates the instantiated, wired VHDL output,
+            resolving generic-dependent port widths per instance
+  gui/      MainFrame, LibraryPanel, CanvasPanel, Dialogs — the Swing UI;
+            OrthogonalRouter — obstacle-avoiding, trunk-sharing wire routing
 ```
 
 ## Limitations
@@ -107,7 +137,8 @@ src/main/java/vhdlconnector/
 - Only the `entity ... is ... end;` declaration is parsed; architecture
   bodies are ignored (not needed for instantiation/wiring).
 - Connections are whole-port-to-whole-port (bus-to-bus); there's no per-bit
-  wiring or width checking — mismatched vector widths are your responsibility.
-- AXI-Stream grouping only applies to ports coming from imported entities;
-  manually created external ports are not auto-grouped even if named the same
-  way.
+  wiring. Width mismatches are flagged as export warnings but not prevented
+  on the canvas.
+- Generic substitution in port widths only evaluates plain integer arithmetic
+  (`+ - * /` and parentheses) — a generic used in a more exotic expression is
+  left as-is (with a warning) if it can't be reduced to a number.
