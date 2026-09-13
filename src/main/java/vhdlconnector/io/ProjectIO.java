@@ -62,6 +62,12 @@ public class ProjectIO {
         for (Object o : Json.arr(root.getOrDefault("connections", new ArrayList<>()))) {
             project.connections.add(connectionFromJson(Json.obj(o)));
         }
+        // A project saved by an older build could have two different connections sharing
+        // the same id (nextConnectionId's counter used to reset to 0 on every load, so the
+        // next connection created after loading could collide with one already in the
+        // file) - repair that now rather than let one silently overwrite the other's
+        // rendering every time routes are computed.
+        project.deduplicateConnectionIds();
         project.projectFilePath = file.getAbsolutePath();
         return project;
     }

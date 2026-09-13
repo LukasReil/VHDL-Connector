@@ -163,8 +163,13 @@ public class CanvasPanel extends JPanel {
         visualConnections.clear();
         if (project == null) return;
 
+        int deduped = project.deduplicateConnectionIds();
         int pruned = project.pruneOrphanedConnections();
-        if (pruned > 0) {
+        if (deduped > 0) {
+            status(deduped + " connection" + (deduped == 1 ? "" : "s") + " had a duplicate internal id and "
+                    + (deduped == 1 ? "was" : "were") + " reassigned a fresh one (this was hijacking another "
+                    + "connection's rendering on-screen; nothing about your wiring changed).");
+        } else if (pruned > 0) {
             status(pruned + " stale connection" + (pruned == 1 ? "" : "s")
                     + " referencing a port that no longer exists (e.g. an entity re-imported with different ports) "
                     + (pruned == 1 ? "was" : "were") + " removed.");

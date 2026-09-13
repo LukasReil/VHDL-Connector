@@ -77,6 +77,9 @@ small built-in reader/writer).
   `.vhd` sources (e.g. via git) keeps those references correct, rather than
   pointing at one machine's absolute file layout. Project files saved by
   older versions of this tool (with an absolute source path) still load fine.
+  A project saved by a build old enough to have two connections sharing the
+  same internal id (which made one silently render in place of the other) is
+  repaired automatically on load, too.
 - **Export VHDL**: generates a top-level entity + architecture (with the
   necessary `library ieee; use ieee.std_logic_1164.all; use
   ieee.numeric_std.all;` clauses) containing component declarations, signal

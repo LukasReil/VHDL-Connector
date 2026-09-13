@@ -45,8 +45,41 @@ public class Project {
         return id;
     }
 
+    /** Unlike a plain incrementing counter, this checks against the connections actually
+     *  present - the counter alone isn't reliable across a save/load round-trip (a freshly
+     *  loaded Project starts it back at 0, so the very next connection created after loading
+     *  could mint an id like "conn2" that the loaded file already uses for something else;
+     *  since routedPaths and similar id-keyed maps just let the newer one overwrite the
+     *  older one's entry, that collision silently hijacks the older connection's rendering -
+     *  see deduplicateConnectionIds for repairing a project that already has this problem). */
     public String nextConnectionId() {
-        return "conn" + (++connectionCounter);
+        String id;
+        do {
+            id = "conn" + (++connectionCounter);
+        } while (hasConnectionId(id));
+        return id;
+    }
+
+    private boolean hasConnectionId(String id) {
+        for (Connection c : connections) if (c.id.equals(id)) return true;
+        return false;
+    }
+
+    /** Repairs a project where two different connections ended up with the same id (the
+     *  save/load counter bug described on nextConnectionId): keeps the first occurrence of
+     *  each id and reassigns a fresh, genuinely unique one to every later duplicate. Returns
+     *  how many were reassigned. */
+    public int deduplicateConnectionIds() {
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        int fixed = 0;
+        for (Connection c : connections) {
+            if (!seen.add(c.id)) {
+                c.id = nextConnectionId();
+                seen.add(c.id);
+                fixed++;
+            }
+        }
+        return fixed;
     }
 
     public void removeInstance(String id) {
