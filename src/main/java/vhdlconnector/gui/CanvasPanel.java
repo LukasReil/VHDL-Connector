@@ -46,6 +46,11 @@ public class CanvasPanel extends JPanel {
     private Point wireCurrentPoint;
 
     private Object selectedItem; // Instance | ExternalPort | Connection | null
+    private final java.util.Set<Instance> selectedInstances = new java.util.LinkedHashSet<>(); // multi-select, for copy/paste
+
+    private final List<ClipboardInstance> clipboardInstances = new ArrayList<>();
+    private final List<ClipboardConnection> clipboardConnections = new ArrayList<>();
+    private static final double PASTE_OFFSET = 30;
 
     private OrthogonalRouter router = new OrthogonalRouter();
 
@@ -65,6 +70,14 @@ public class CanvasPanel extends JPanel {
         getInputMap(WHEN_FOCUSED).put(KeyStroke.getKeyStroke(KeyEvent.VK_DELETE, 0), "deleteSelected");
         getActionMap().put("deleteSelected", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) { deleteSelected(); }
+        });
+        getInputMap(WHEN_FOCUSED).put(KeyStroke.getKeyStroke(KeyEvent.VK_C, InputEvent.CTRL_DOWN_MASK), "copySelection");
+        getActionMap().put("copySelection", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { copySelection(); }
+        });
+        getInputMap(WHEN_FOCUSED).put(KeyStroke.getKeyStroke(KeyEvent.VK_V, InputEvent.CTRL_DOWN_MASK), "pasteClipboard");
+        getActionMap().put("pasteClipboard", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { pasteClipboard(); }
         });
 
         ToolTipManager.sharedInstance().registerComponent(this);
@@ -88,6 +101,7 @@ public class CanvasPanel extends JPanel {
     public void setProject(Project project) {
         this.project = project;
         selectedItem = null;
+        selectedInstances.clear();
         draggingInstance = null;
         draggingExternalPorts = null;
         draggingWire = false;
@@ -454,7 +468,7 @@ public class CanvasPanel extends JPanel {
     }
 
     private void drawInstance(Graphics2D g2, InstanceBox box) {
-        boolean sel = box.inst == selectedItem;
+        boolean sel = selectedInstances.contains(box.inst);
         RoundRectangle2DHelper.fillRoundRect(g2, box.x, box.y, box.width, box.height, 8, new Color(214, 226, 245));
         g2.setColor(sel ? new Color(40, 110, 210) : new Color(120, 135, 160));
         g2.setStroke(new BasicStroke(sel ? 2.2f : 1.2f));
@@ -732,6 +746,7 @@ public class CanvasPanel extends JPanel {
             wireStart = pin;
             wireCurrentPoint = p;
             selectedItem = null;
+            selectedInstances.clear();
             repaint();
             return;
         }
@@ -742,6 +757,7 @@ public class CanvasPanel extends JPanel {
             dragOffsetX = p.x - extPin.x;
             dragOffsetY = p.y - extPin.y;
             selectedItem = extPin.group != null ? extPin.group : extPin.single;
+            selectedInstances.clear();
             repaint();
             return;
         }
@@ -751,6 +767,18 @@ public class CanvasPanel extends JPanel {
             draggingInstance = inst;
             dragOffsetX = p.x - inst.x;
             dragOffsetY = p.y - inst.y;
+            boolean ctrl = (e.getModifiersEx() & InputEvent.CTRL_DOWN_MASK) != 0;
+            if (ctrl) {
+                // Ctrl+Click toggles this instance's membership in the multi-selection,
+                // used for picking several instances to copy together.
+                if (!selectedInstances.remove(inst)) selectedInstances.add(inst);
+            } else if (!selectedInstances.contains(inst)) {
+                // plain click on an instance outside the current multi-selection replaces it;
+                // plain click on one already in the selection leaves the group selected, so
+                // you can still drag that one instance without losing the group for copying.
+                selectedInstances.clear();
+                selectedInstances.add(inst);
+            }
             selectedItem = inst;
             project.instances.remove(inst);
             project.instances.add(inst); // bring to front
@@ -760,6 +788,7 @@ public class CanvasPanel extends JPanel {
 
         Connection conn = hitTestConnection(p);
         selectedItem = conn; // may be null -> deselect
+        selectedInstances.clear();
         repaint();
     }
 
@@ -902,9 +931,11 @@ public class CanvasPanel extends JPanel {
     }
 
     private void deleteSelected() {
-        if (selectedItem instanceof Instance) {
-            project.removeInstance(((Instance) selectedItem).id);
-            status("Instance deleted.");
+        if (!selectedInstances.isEmpty()) {
+            int count = selectedInstances.size();
+            for (Instance inst : new ArrayList<>(selectedInstances)) project.removeInstance(inst.id);
+            status(count > 1 ? count + " instances deleted." : "Instance deleted.");
+            selectedInstances.clear();
         } else if (selectedItem instanceof ExternalPort) {
             project.removeExternalPort(((ExternalPort) selectedItem).name);
             status("External port deleted.");
@@ -922,6 +953,129 @@ public class CanvasPanel extends JPanel {
         selectedItem = null;
         layoutChanged();
         changed();
+    }
+
+    // ---------------- copy / paste ----------------
+
+    private static class ClipboardInstance {
+        String entityName;
+        String label;
+        double x, y;
+        Map<String, String> genericOverrides;
+    }
+
+    private static class ClipboardConnection {
+        int fromIndex, toIndex; // indices into the clipboard instance list
+        String fromPort, toPort;
+        boolean isBus;
+    }
+
+    /** Copies the current multi-selection (or the single selected instance) to an in-memory
+     *  clipboard: entity, label, position and generic overrides for each instance, plus any
+     *  connection that runs between two of the copied instances - a connection to anything
+     *  outside the copied set is deliberately left out, since it can't be reproduced without
+     *  also copying whatever it connects to. */
+    private void copySelection() {
+        List<Instance> toCopy = new ArrayList<>(selectedInstances);
+        if (toCopy.isEmpty() && selectedItem instanceof Instance) toCopy.add((Instance) selectedItem);
+        if (toCopy.isEmpty()) {
+            status("Nothing selected to copy.");
+            return;
+        }
+
+        clipboardInstances.clear();
+        clipboardConnections.clear();
+
+        Map<String, Integer> idToIndex = new java.util.HashMap<>();
+        for (Instance inst : toCopy) {
+            idToIndex.put(inst.id, clipboardInstances.size());
+            ClipboardInstance ci = new ClipboardInstance();
+            ci.entityName = inst.entityName;
+            ci.label = inst.label;
+            ci.x = inst.x;
+            ci.y = inst.y;
+            ci.genericOverrides = new java.util.LinkedHashMap<>(inst.genericOverrides);
+            clipboardInstances.add(ci);
+        }
+
+        for (Connection c : project.connections) {
+            if (c.a.kind != Endpoint.Kind.INSTANCE || c.b.kind != Endpoint.Kind.INSTANCE) continue;
+            Integer fromIndex = idToIndex.get(c.a.instanceId);
+            Integer toIndex = idToIndex.get(c.b.instanceId);
+            if (fromIndex == null || toIndex == null) continue; // touches something outside the copied set
+            ClipboardConnection cc = new ClipboardConnection();
+            cc.fromIndex = fromIndex;
+            cc.fromPort = c.a.portName;
+            cc.toIndex = toIndex;
+            cc.toPort = c.b.portName;
+            cc.isBus = c.isBus;
+            clipboardConnections.add(cc);
+        }
+
+        status("Copied " + toCopy.size() + " instance" + (toCopy.size() == 1 ? "" : "s")
+                + (clipboardConnections.isEmpty() ? "" : " and " + clipboardConnections.size() + " connection(s)") + ".");
+    }
+
+    /** Pastes the clipboard as new instances (new unique ids and, if needed, unique
+     *  instantiation labels) with their generic overrides intact, offset from their copied
+     *  position, plus new connections reproducing every link the copy captured between them.
+     *  Each paste cascades further from the last, like most editors' repeated-paste behavior. */
+    private void pasteClipboard() {
+        if (clipboardInstances.isEmpty()) {
+            status("Nothing to paste.");
+            return;
+        }
+        for (ClipboardInstance ci : clipboardInstances) {
+            if (project.library.get(ci.entityName) == null) {
+                status("Cannot paste: entity '" + ci.entityName + "' is no longer in the library.");
+                return;
+            }
+        }
+
+        Map<Integer, Instance> newInstances = new java.util.HashMap<>();
+        List<Instance> pasted = new ArrayList<>();
+        for (int i = 0; i < clipboardInstances.size(); i++) {
+            ClipboardInstance ci = clipboardInstances.get(i);
+            ci.x += PASTE_OFFSET;
+            ci.y += PASTE_OFFSET;
+            Instance inst = new Instance(project.nextInstanceId(ci.entityName), ci.entityName, ci.x, ci.y);
+            inst.label = uniqueInstanceLabel(ci.label);
+            inst.genericOverrides = new java.util.LinkedHashMap<>(ci.genericOverrides);
+            project.instances.add(inst);
+            newInstances.put(i, inst);
+            pasted.add(inst);
+        }
+        for (ClipboardConnection cc : clipboardConnections) {
+            Instance from = newInstances.get(cc.fromIndex);
+            Instance to = newInstances.get(cc.toIndex);
+            if (from == null || to == null) continue;
+            Endpoint a = Endpoint.instancePort(from.id, cc.fromPort);
+            Endpoint b = Endpoint.instancePort(to.id, cc.toPort);
+            project.connections.add(new Connection(project.nextConnectionId(), a, b, cc.isBus));
+        }
+
+        selectedInstances.clear();
+        selectedInstances.addAll(pasted);
+        selectedItem = pasted.size() == 1 ? pasted.get(0) : null;
+        status("Pasted " + pasted.size() + " instance" + (pasted.size() == 1 ? "" : "s")
+                + (clipboardConnections.isEmpty() ? "" : " and " + clipboardConnections.size() + " connection(s)") + ".");
+        layoutChanged();
+        changed();
+    }
+
+    private String uniqueInstanceLabel(String base) {
+        if (!isLabelTaken(base)) return base;
+        int n = 2;
+        String candidate;
+        do {
+            candidate = base + "_" + n++;
+        } while (isLabelTaken(candidate));
+        return candidate;
+    }
+
+    private boolean isLabelTaken(String label) {
+        for (Instance inst : project.instances) if (inst.label.equals(label)) return true;
+        return false;
     }
 
     // ---------------- context menu ----------------

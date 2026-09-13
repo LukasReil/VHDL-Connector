@@ -100,7 +100,17 @@ java -cp out vhdlconnector.Main
 2. Select an entity and click **Add to Canvas** (or double-click it) to place
    an instance. Drag the instance around the canvas to position it — wires
    attached to it reroute automatically around other instances.
-3. **Wire ports together** by dragging from one pin to another:
+3. **Click an instance to select it; Ctrl+Click additional instances to build
+   a multi-selection** (Ctrl+Click a selected instance again to deselect just
+   that one). **Ctrl+C** copies the selection, **Ctrl+V** pastes it as new
+   instances, offset from the originals (repeated pasting cascades further
+   each time). A pasted instance keeps its generics overrides and, if two
+   copied instances were directly wired together, that connection is
+   recreated between the two pasted copies — a connection to anything outside
+   the copied set is left out, since there'd be nothing to reconnect it to.
+   Instantiation labels are kept unless they'd collide with an existing one,
+   in which case the copy gets a numbered suffix.
+4. **Wire ports together** by dragging from one pin to another:
    - Blue pins are inputs, orange pins are outputs, purple pins are inout.
    - Teal square pins are bundled AXI-Stream interfaces (`S_AXIS`/`M_AXIS`,
      on instances and on external ports alike); hover over one to see the
@@ -110,23 +120,23 @@ java -cp out vhdlconnector.Main
    - Incompatible connections (output-to-output, input-to-input, or two
      AXI-Stream interfaces with the same role) are rejected with a message in
      the status bar.
-4. **Right-click** an instance, external port, or wire for more actions:
+5. **Right-click** an instance, external port, or wire for more actions:
    rename an instance's instantiation label, edit its generics, edit/delete an
    external port or AXI-Stream interface, or delete a connection (deleting a
    bundled AXI-Stream link removes every signal in it at once).
-5. **Right-click empty canvas** to add a new external (top-level) port at that
+6. **Right-click empty canvas** to add a new external (top-level) port at that
    position — pick its type (`std_logic`, `std_logic_vector`, `AXI4-Stream`,
    or `Custom...`) in the dialog that appears.
-6. External ports can be dragged anywhere on the canvas, just like instances;
+7. External ports can be dragged anywhere on the canvas, just like instances;
    clicking precisely on the pin tip instead starts a wire.
-7. **Edit > Set Top Entity Name...** sets the name of the entity that will be
+8. **Edit > Set Top Entity Name...** sets the name of the entity that will be
    generated on export.
-8. **File > Save Project** (`Ctrl+S`) **/ Save Project As...** (`Ctrl+Shift+S`)
+9. **File > Save Project** (`Ctrl+S`) **/ Save Project As...** (`Ctrl+Shift+S`)
    writes the whole design (library + instances + wiring) to a `.json` file.
    **File > Open Project...** (`Ctrl+O`) reloads it later, and **New Project**
    (`Ctrl+N`) starts a fresh one.
-9. **File > Export VHDL...** writes out the generated top-level entity and
-   architecture, ready to add to your VHDL sources.
+10. **File > Export VHDL...** writes out the generated top-level entity and
+    architecture, ready to add to your VHDL sources.
 
 Press **Delete** to remove whatever is currently selected (instance, external
 port, AXI-Stream interface, or connection/link).
