@@ -96,7 +96,7 @@ public final class OrthogonalRouter {
      * Larger values yield fewer, longer straight runs; smaller values yield shorter but
      * more fidgety routes.
      */
-    private static final double BEND_PENALTY_RATIO = 0.02;
+    private static final double BEND_PENALTY_RATIO = 0.01;
 
     /**
      * Distance kept between a route and an obstacle border. {@code 0} lets routes hug obstacles
@@ -123,7 +123,7 @@ public final class OrthogonalRouter {
      * to spread routes out more aggressively, lower it to keep them short. It must stay finite, so
      * that a corridor which is the only connection is still used rather than reported unroutable.
      */
-    private static final double CONGESTION_PENALTY = 3.0;
+    private static final double CONGESTION_PENALTY = 5.0;
 
     /** Segments drawn by earlier calls on this instance. */
     private final RoutingMemory memory = new RoutingMemory();

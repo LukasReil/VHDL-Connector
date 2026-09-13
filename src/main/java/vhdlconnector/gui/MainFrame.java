@@ -306,9 +306,18 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
     private boolean confirmDiscardIfDirty() {
         if (!dirty) return true;
         int choice = JOptionPane.showConfirmDialog(this,
-                "You have unsaved changes. Discard them?", "Unsaved Changes",
-                JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-        return choice == JOptionPane.YES_OPTION;
+                "You have unsaved changes. Save them before exiting?", "Unsaved Changes",
+                JOptionPane.YES_NO_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (choice == JOptionPane.CANCEL_OPTION) {
+            return false;
+        }
+        if (choice == JOptionPane.YES_OPTION) {
+            saveProject();
+            return !dirty; // if still dirty, user cancelled save dialog
+        }
+
+        // user chose "No" - discard changes
+        return true;
     }
 
     private void updateTitle() {
