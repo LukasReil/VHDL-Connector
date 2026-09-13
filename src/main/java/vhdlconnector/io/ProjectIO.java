@@ -17,11 +17,12 @@ import java.util.Map;
 public class ProjectIO {
 
     public void save(Project project, File file) throws IOException {
+        File projectDir = file.getAbsoluteFile().getParentFile();
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("topEntityName", project.topEntityName);
 
         List<Object> entities = new ArrayList<>();
-        for (VhdlEntity e : project.library.values()) entities.add(entityToJson(e));
+        for (VhdlEntity e : project.library.values()) entities.add(entityToJson(e, projectDir));
         root.put("library", entities);
 
         List<Object> instances = new ArrayList<>();
@@ -41,6 +42,7 @@ public class ProjectIO {
     }
 
     public Project load(File file) throws IOException {
+        File projectDir = file.getAbsoluteFile().getParentFile();
         String text = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
         Map<String, Object> root = Json.obj(Json.parse(text));
 
@@ -48,7 +50,7 @@ public class ProjectIO {
         project.topEntityName = Json.str(root, "topEntityName", "top_design");
 
         for (Object o : Json.arr(root.getOrDefault("library", new ArrayList<>()))) {
-            VhdlEntity e = entityFromJson(Json.obj(o));
+            VhdlEntity e = entityFromJson(Json.obj(o), projectDir);
             project.addEntity(e);
         }
         for (Object o : Json.arr(root.getOrDefault("instances", new ArrayList<>()))) {
@@ -66,10 +68,10 @@ public class ProjectIO {
 
     // ---------- entity ----------
 
-    private Map<String, Object> entityToJson(VhdlEntity e) {
+    private Map<String, Object> entityToJson(VhdlEntity e, File projectDir) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", e.name);
-        if (e.sourceFile != null) m.put("sourceFile", e.sourceFile);
+        if (e.sourceFile != null) m.put("sourceFile", relativizeToProject(e.sourceFile, projectDir));
         List<Object> gens = new ArrayList<>();
         for (GenericParam g : e.generics) {
             Map<String, Object> gm = new LinkedHashMap<>();
@@ -91,9 +93,10 @@ public class ProjectIO {
         return m;
     }
 
-    private VhdlEntity entityFromJson(Map<String, Object> m) {
+    private VhdlEntity entityFromJson(Map<String, Object> m, File projectDir) {
         VhdlEntity e = new VhdlEntity(Json.str(m, "name", "unnamed"));
-        e.sourceFile = (String) m.get("sourceFile");
+        String storedSourceFile = (String) m.get("sourceFile");
+        e.sourceFile = storedSourceFile != null ? resolveAgainstProject(storedSourceFile, projectDir) : null;
         for (Object o : Json.arr(m.getOrDefault("generics", new ArrayList<>()))) {
             Map<String, Object> gm = Json.obj(o);
             e.generics.add(new GenericParam(Json.str(gm, "name", ""), Json.str(gm, "type", ""), (String) gm.get("defaultValue")));
@@ -103,6 +106,28 @@ public class ProjectIO {
             e.ports.add(new Port(Json.str(pm, "name", ""), Direction.parse(Json.str(pm, "direction", "in")), Json.str(pm, "type", "std_logic")));
         }
         return e;
+    }
+
+    /** Stores an entity's source .vhd path relative to the project file's own directory,
+     *  so a project stays portable if the whole folder (project + sources) is moved or
+     *  shared - e.g. via git - rather than being tied to one machine's absolute layout.
+     *  Falls back to the absolute path if the two can't be related (e.g. different drive
+     *  roots on Windows). */
+    private String relativizeToProject(String absoluteSourceFile, File projectDir) {
+        if (projectDir == null) return absoluteSourceFile;
+        try {
+            return projectDir.toPath().relativize(java.nio.file.Paths.get(absoluteSourceFile)).toString();
+        } catch (IllegalArgumentException ex) {
+            return absoluteSourceFile;
+        }
+    }
+
+    /** Resolves a stored sourceFile path against the project file's directory. Transparently
+     *  handles project files saved before this change (which stored an absolute path):
+     *  Path.resolve returns an absolute argument unchanged, so old projects keep working. */
+    private String resolveAgainstProject(String storedSourceFile, File projectDir) {
+        if (projectDir == null) return storedSourceFile;
+        return projectDir.toPath().resolve(storedSourceFile).normalize().toString();
     }
 
     // ---------- instance ----------

@@ -45,7 +45,12 @@ small built-in reader/writer).
   two inputs together.
 - **Save/Open projects** as a self-contained `.json` file — the full library
   (including parsed port/generic data) is embedded, so re-opening a project
-  doesn't require the original `.vhd` files to still be around.
+  doesn't require the original `.vhd` files to still be around. Each entity's
+  source file is recorded *relative to the project file itself*, so a project
+  stays portable: moving or sharing the project folder together with its
+  `.vhd` sources (e.g. via git) keeps those references correct, rather than
+  pointing at one machine's absolute file layout. Project files saved by
+  older versions of this tool (with an absolute source path) still load fine.
 - **Export VHDL**: generates a top-level entity + architecture (with the
   necessary `library ieee; use ieee.std_logic_1164.all; use
   ieee.numeric_std.all;` clauses) containing component declarations, signal
@@ -125,7 +130,8 @@ src/main/java/vhdlconnector/
   parser/   VhdlEntityParser — extracts entity/generic/port declarations
             from VHDL source
   json/     Minimal dependency-free JSON reader/writer
-  io/       ProjectIO — saves/loads a Project as JSON
+  io/       ProjectIO — saves/loads a Project as JSON, storing each entity's
+            source .vhd path relative to the project file for portability
   export/   VhdlExporter — generates the instantiated, wired VHDL output,
             resolving generic-dependent port widths per instance
   gui/      MainFrame, LibraryPanel, CanvasPanel, Dialogs — the Swing UI;
