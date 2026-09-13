@@ -67,6 +67,19 @@ public class Project {
         connections.removeIf(c -> c.touches(e));
     }
 
+    /** Removes any connection whose endpoint can no longer be resolved to a real port - e.g.
+     *  an instance whose entity was re-imported with a different port list (renaming or
+     *  dropping a port), leaving a connection referencing a name that no longer exists. Such
+     *  a connection can never be drawn (there's no pin left to draw it at) but still counts
+     *  as "already connected" for that dangling endpoint, silently blocking any new wire to
+     *  it forever - so it needs to actually be removed, not just skipped when rendering.
+     *  Returns how many were removed. */
+    public int pruneOrphanedConnections() {
+        int before = connections.size();
+        connections.removeIf(c -> resolvePort(c.a) == null || resolvePort(c.b) == null);
+        return before - connections.size();
+    }
+
     /** Look up direction + type for an endpoint, or null if it cannot be resolved. */
     public Port resolvePort(Endpoint e) {
         if (e.kind == Endpoint.Kind.EXTERNAL) {

@@ -256,6 +256,14 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
             JOptionPane.showMessageDialog(this, errors.toString(), "Import Warnings", JOptionPane.WARNING_MESSAGE);
         }
         status("Imported " + imported + " entity/entities.");
+        if (imported > 0) {
+            // an overwritten entity may have dropped or renamed a port that existing
+            // instances were wired to; this immediately cleans up any resulting stale
+            // connection (and reports it, taking over the status line above) instead of
+            // leaving it silently blocking a pin until some unrelated canvas action
+            // happens to trigger the same cleanup.
+            canvasPanel.layoutChanged();
+        }
     }
 
     private void exportVhdl() {

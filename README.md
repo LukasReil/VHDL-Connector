@@ -13,7 +13,11 @@ small built-in reader/writer).
 
 - **Import VHDL entities** from `.vhd`/`.vhdl` files (or recursively from a
   whole folder) — the entity name, generics, and ports are parsed straight out
-  of the `entity ... is ... end entity;` declaration.
+  of the `entity ... is ... end entity;` declaration. Re-importing over an
+  existing library entity (e.g. after fixing up the source) automatically
+  drops any connection left dangling by a port that got renamed or removed in
+  the process, rather than leaving a stale connection that can never be drawn
+  but still blocks a new wire to that pin.
 - **Import Vivado IP** from an IP folder (recursively, same as the VHDL folder
   import): each core's `.vho` instantiation template — a `COMPONENT ... PORT
   (...); END COMPONENT;` block plus a port-map template, as Vivado generates

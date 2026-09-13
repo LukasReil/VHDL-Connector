@@ -163,6 +163,13 @@ public class CanvasPanel extends JPanel {
         visualConnections.clear();
         if (project == null) return;
 
+        int pruned = project.pruneOrphanedConnections();
+        if (pruned > 0) {
+            status(pruned + " stale connection" + (pruned == 1 ? "" : "s")
+                    + " referencing a port that no longer exists (e.g. an entity re-imported with different ports) "
+                    + (pruned == 1 ? "was" : "were") + " removed.");
+        }
+
         router.reset();
 
         List<Rectangle2D> obstacles = new ArrayList<>();
@@ -173,21 +180,25 @@ public class CanvasPanel extends JPanel {
 
         java.util.Set<Connection> handled = new java.util.HashSet<>();
 
-        // AXI-Stream bundles: one route stands in for every signal in the bundle
+        // AXI-Stream bundles: one route stands in for every signal in the bundle. Resolve
+        // before marking anything handled - a bundle member that fails to resolve must not
+        // take its (perfectly fine) bundle-mates down with it; they still get a chance below.
         for (Connection c : project.connections) {
             if (handled.contains(c)) continue;
             List<Connection> bundle = bundleFor(c);
             if (bundle.size() <= 1) continue;
-            handled.addAll(bundle);
             Point2D p1 = resolveEndpointPoint(c.a);
             Point2D p2 = resolveEndpointPoint(c.b);
             if (p1 == null || p2 == null) continue;
+            handled.addAll(bundle);
             List<Point2D> path = router.route(p1, java.util.Collections.singletonList(p2), obstacles, bounds).get(0);
             for (Connection member : bundle) routedPaths.put(member.id, path);
             visualConnections.add(bundle.get(0));
         }
 
-        // everything else, grouped by driver pin so fan-outs share a trunk
+        // everything else, grouped by driver pin so fan-outs share a trunk. Only connections
+        // whose destination actually resolves are handed to the router; the rest fall through
+        // to the fallback pass below rather than being silently dropped or faked.
         Map<Endpoint, List<Connection>> bySource = new java.util.LinkedHashMap<>();
         Map<Connection, Endpoint> destOf = new java.util.HashMap<>();
         for (Connection c : project.connections) {
@@ -204,13 +215,32 @@ public class CanvasPanel extends JPanel {
             if (sourcePoint == null) continue;
             List<Connection> conns = e.getValue();
             List<Point2D> destPoints = new ArrayList<>();
+            List<Connection> resolvableConns = new ArrayList<>();
             for (Connection c : conns) {
                 Point2D dp = resolveEndpointPoint(destOf.get(c));
-                destPoints.add(dp != null ? dp : sourcePoint);
+                if (dp == null) continue;
+                destPoints.add(dp);
+                resolvableConns.add(c);
             }
+            if (resolvableConns.isEmpty()) continue;
             List<List<Point2D>> paths = router.route(sourcePoint, destPoints, obstacles, bounds);
-            for (int i = 0; i < conns.size(); i++) routedPaths.put(conns.get(i).id, paths.get(i));
-            visualConnections.addAll(conns);
+            for (int i = 0; i < resolvableConns.size(); i++) routedPaths.put(resolvableConns.get(i).id, paths.get(i));
+            visualConnections.addAll(resolvableConns);
+            handled.addAll(resolvableConns);
+        }
+
+        // Safety net: anything not yet handled (a bundle whose "nice" path failed, or a
+        // connection whose shared driver pin couldn't be resolved on its own) still gets a
+        // direct fallback line as long as its own two endpoints resolve. A connection with
+        // two genuinely valid endpoints must never end up invisible just because of how it
+        // happened to get grouped for the fancier routing above.
+        for (Connection c : project.connections) {
+            if (handled.contains(c)) continue;
+            Point2D p1 = resolveEndpointPoint(c.a);
+            Point2D p2 = resolveEndpointPoint(c.b);
+            if (p1 == null || p2 == null) continue; // genuinely orphaned; pruned on the next pass
+            routedPaths.put(c.id, java.util.Arrays.asList(p1, p2));
+            visualConnections.add(c);
         }
     }
 
