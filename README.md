@@ -27,7 +27,11 @@ small built-in reader/writer).
   dragging from one pin to another. Wires are auto-routed at right angles
   around instance boxes rather than drawn straight through them, and signals
   fanning out from the same source pin (e.g. a shared `clk`) share a common
-  trunk instead of being drawn as separate overlapping lines.
+  trunk instead of being drawn as separate overlapping lines. If the router
+  ever judges a particular pin unreachable under its own layout rules (rare,
+  but geometrically possible in a tight layout), the connection still draws
+  as a plain straight line rather than silently vanishing while remaining
+  "connected" underneath.
 - **Automatic AXI4-Stream grouping**: any run of ports ending in `_t<signal>`
   (`tdata`, `tvalid`, `tready`, `tlast`, `tkeep`, `tstrb`, `tid`, `tdest`,
   `tuser`) whose shared prefix contains an `axi`/`axis` token is detected and

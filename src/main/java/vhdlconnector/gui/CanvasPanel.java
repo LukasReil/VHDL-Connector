@@ -171,6 +171,7 @@ public class CanvasPanel extends JPanel {
         }
 
         router.reset();
+        int fallbackUsed = 0;
 
         List<Rectangle2D> obstacles = new ArrayList<>();
         for (Instance inst : project.instances) {
@@ -192,6 +193,12 @@ public class CanvasPanel extends JPanel {
             if (p1 == null || p2 == null) continue;
             handled.addAll(bundle);
             List<Point2D> path = router.route(p1, java.util.Collections.singletonList(p2), obstacles, bounds).get(0);
+            // OrthogonalRouter returns an EMPTY list (not null) for a destination it decides
+            // is unreachable under its own constraints (e.g. wedged too close to another pin
+            // or obstacle to be entered horizontally) - trusting that blindly stored a
+            // 0-point "path", which draws nothing while the connection stays fully "connected"
+            // in the model. A straight fallback line guarantees this can never go invisible.
+            if (path == null || path.size() < 2) { path = java.util.Arrays.asList(p1, p2); fallbackUsed++; }
             for (Connection member : bundle) routedPaths.put(member.id, path);
             visualConnections.add(bundle.get(0));
         }
@@ -224,7 +231,16 @@ public class CanvasPanel extends JPanel {
             }
             if (resolvableConns.isEmpty()) continue;
             List<List<Point2D>> paths = router.route(sourcePoint, destPoints, obstacles, bounds);
-            for (int i = 0; i < resolvableConns.size(); i++) routedPaths.put(resolvableConns.get(i).id, paths.get(i));
+            for (int i = 0; i < resolvableConns.size(); i++) {
+                // As above: the router reports a destination it can't reach under its own
+                // constraints as an empty list rather than null - e.g. two pins on the same
+                // instance close enough together that one ends up wedged once the other's
+                // stub claims the approach. Two real, resolved endpoints must still always
+                // draw as something, even if not the fancy shared-trunk route.
+                List<Point2D> path = paths.get(i);
+                if (path == null || path.size() < 2) { path = java.util.Arrays.asList(sourcePoint, destPoints.get(i)); fallbackUsed++; }
+                routedPaths.put(resolvableConns.get(i).id, path);
+            }
             visualConnections.addAll(resolvableConns);
             handled.addAll(resolvableConns);
         }
@@ -241,6 +257,18 @@ public class CanvasPanel extends JPanel {
             if (p1 == null || p2 == null) continue; // genuinely orphaned; pruned on the next pass
             routedPaths.put(c.id, java.util.Arrays.asList(p1, p2));
             visualConnections.add(c);
+        }
+
+        // Surface it when the fallback above actually had to kick in - it means the router
+        // judged a destination unreachable under its own layout rules (see OrthogonalRouter's
+        // route() contract), which should be rare; a straight line was substituted so the
+        // connection stays visible, but if this keeps showing up it's worth reporting with
+        // the exact layout that triggers it. Deferred to the (rarer, more actionable) prune
+        // message above if both happened in the same pass.
+        if (pruned == 0 && fallbackUsed > 0) {
+            status(fallbackUsed + " connection" + (fallbackUsed == 1 ? "" : "s")
+                    + " fell back to a straight line - the router couldn't fit its usual routed path for "
+                    + (fallbackUsed == 1 ? "it" : "them") + " in the current layout.");
         }
     }
 
