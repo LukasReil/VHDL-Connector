@@ -1,10 +1,13 @@
 package vhdlconnector.gui;
 
 import vhdlconnector.model.Direction;
+import vhdlconnector.model.Endpoint;
 import vhdlconnector.model.ExternalPort;
 import vhdlconnector.model.GenericParam;
+import vhdlconnector.model.Instance;
 import vhdlconnector.model.Port;
 import vhdlconnector.model.PortGroup;
+import vhdlconnector.model.Project;
 import vhdlconnector.model.VhdlEntity;
 
 import javax.swing.*;
@@ -13,8 +16,10 @@ import javax.swing.event.DocumentListener;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -356,5 +361,186 @@ public final class Dialogs {
         area.setEditable(false);
         area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         JOptionPane.showMessageDialog(parent, new JScrollPane(area), "Entity: " + entity.name, JOptionPane.PLAIN_MESSAGE);
+    }
+
+    /** What the user picked in the auto-connect dialog: one source signal, a destination
+     *  port name to look for on other instances, and which instances to actually consider. */
+    public static final class AutoConnectRequest {
+        public Endpoint source;
+        public String destinationPortName;
+        public Set<String> enabledInstanceIds;
+    }
+
+    /** Shows the "connect one signal to every instance with a matching port name" dialog.
+     *  Returns null if cancelled or if there's nothing to auto-connect to. */
+    public static AutoConnectRequest promptAutoConnect(Component parent, Project project) {
+        if (project.instances.isEmpty()) {
+            JOptionPane.showMessageDialog(parent, "There are no instances on the canvas to connect to.", "Auto-Connect", JOptionPane.INFORMATION_MESSAGE);
+            return null;
+        }
+
+        String SRC_INSTANCE = "Instance Port";
+        String SRC_EXTERNAL = "External Port";
+        JComboBox<String> sourceKindBox = new JComboBox<>(new String[]{SRC_INSTANCE, SRC_EXTERNAL});
+
+        JComboBox<Instance> sourceInstanceBox = new JComboBox<>(project.instances.toArray(new Instance[0]));
+        sourceInstanceBox.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean hasFocus) {
+                super.getListCellRendererComponent(list, value, index, isSelected, hasFocus);
+                if (value instanceof Instance) {
+                    Instance inst = (Instance) value;
+                    setText(inst.label + " (" + inst.entityName + ")");
+                }
+                return this;
+            }
+        });
+        JComboBox<Port> sourceInstancePortBox = new JComboBox<>();
+        Runnable refreshSourceInstancePorts = () -> {
+            sourceInstancePortBox.removeAllItems();
+            Instance inst = (Instance) sourceInstanceBox.getSelectedItem();
+            if (inst == null) return;
+            VhdlEntity entity = project.getEntityForInstance(inst);
+            if (entity == null) return;
+            for (Port p : entity.ports) sourceInstancePortBox.addItem(p);
+        };
+        sourceInstanceBox.addActionListener(e -> refreshSourceInstancePorts.run());
+        refreshSourceInstancePorts.run();
+        sourceInstancePortBox.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean hasFocus) {
+                super.getListCellRendererComponent(list, value, index, isSelected, hasFocus);
+                if (value instanceof Port) setText(((Port) value).name + " (" + ((Port) value).direction.vhdl() + ")");
+                return this;
+            }
+        });
+
+        JPanel instanceSourceCard = new JPanel(new GridLayout(0, 2, 6, 6));
+        instanceSourceCard.add(new JLabel("Instance:"));
+        instanceSourceCard.add(sourceInstanceBox);
+        instanceSourceCard.add(new JLabel("Port:"));
+        instanceSourceCard.add(sourceInstancePortBox);
+
+        JComboBox<ExternalPort> sourceExternalBox = new JComboBox<>(project.externalPorts.toArray(new ExternalPort[0]));
+        sourceExternalBox.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean hasFocus) {
+                super.getListCellRendererComponent(list, value, index, isSelected, hasFocus);
+                if (value instanceof ExternalPort) setText(((ExternalPort) value).name + " (" + ((ExternalPort) value).direction.vhdl() + ")");
+                return this;
+            }
+        });
+        JPanel externalSourceCard = new JPanel(new GridLayout(0, 2, 6, 6));
+        externalSourceCard.add(new JLabel("External port:"));
+        externalSourceCard.add(sourceExternalBox);
+
+        CardLayout sourceCards = new CardLayout();
+        JPanel sourceCardPanel = new JPanel(sourceCards);
+        sourceCardPanel.add(instanceSourceCard, SRC_INSTANCE);
+        sourceCardPanel.add(externalSourceCard, SRC_EXTERNAL);
+        if (project.externalPorts.isEmpty()) sourceKindBox.setSelectedItem(SRC_INSTANCE);
+        sourceKindBox.addActionListener(e -> sourceCards.show(sourceCardPanel, (String) sourceKindBox.getSelectedItem()));
+
+        JPanel sourcePanel = new JPanel(new BorderLayout(6, 6));
+        JPanel sourceKindRow = new JPanel(new GridLayout(0, 2, 6, 6));
+        sourceKindRow.add(new JLabel("Source:"));
+        sourceKindRow.add(sourceKindBox);
+        sourcePanel.add(sourceKindRow, BorderLayout.NORTH);
+        sourcePanel.add(sourceCardPanel, BorderLayout.CENTER);
+        sourcePanel.setBorder(BorderFactory.createTitledBorder("Connect from"));
+
+        // destination: a port name to look for, plus which instances to consider
+        JTextField destPortField = new JTextField(16);
+        String[] lastAutoFill = {""};
+        Runnable syncDestDefault = () -> {
+            Port p = null;
+            if (SRC_INSTANCE.equals(sourceKindBox.getSelectedItem())) {
+                p = (Port) sourceInstancePortBox.getSelectedItem();
+            } else {
+                ExternalPort ep = (ExternalPort) sourceExternalBox.getSelectedItem();
+                if (ep != null) p = new Port(ep.name, ep.direction, ep.type);
+            }
+            String name = p != null ? p.name : "";
+            if (destPortField.getText().equals(lastAutoFill[0])) destPortField.setText(name);
+            lastAutoFill[0] = name;
+        };
+        sourceInstanceBox.addActionListener(e -> syncDestDefault.run());
+        sourceInstancePortBox.addActionListener(e -> syncDestDefault.run());
+        sourceExternalBox.addActionListener(e -> syncDestDefault.run());
+        sourceKindBox.addActionListener(e -> syncDestDefault.run());
+        syncDestDefault.run();
+
+        Map<Instance, JCheckBox> instanceChecks = new LinkedHashMap<>();
+        JPanel checklist = new JPanel();
+        checklist.setLayout(new BoxLayout(checklist, BoxLayout.Y_AXIS));
+        for (Instance inst : project.instances) {
+            JCheckBox cb = new JCheckBox(inst.label + " (" + inst.entityName + ")", true);
+            instanceChecks.put(inst, cb);
+            checklist.add(cb);
+        }
+        JScrollPane checklistScroll = new JScrollPane(checklist);
+        checklistScroll.setPreferredSize(new Dimension(320, 160));
+        JPanel checklistButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        JButton allBtn = new JButton("All");
+        JButton noneBtn = new JButton("None");
+        allBtn.addActionListener(e -> instanceChecks.values().forEach(cb -> cb.setSelected(true)));
+        noneBtn.addActionListener(e -> instanceChecks.values().forEach(cb -> cb.setSelected(false)));
+        checklistButtons.add(allBtn);
+        checklistButtons.add(noneBtn);
+
+        JPanel destTop = new JPanel(new GridLayout(0, 2, 6, 6));
+        destTop.add(new JLabel("Destination port name:"));
+        destTop.add(destPortField);
+
+        JPanel destPanel = new JPanel(new BorderLayout(6, 6));
+        destPanel.add(destTop, BorderLayout.NORTH);
+        JPanel destChecklistPanel = new JPanel(new BorderLayout(4, 4));
+        destChecklistPanel.add(new JLabel("Connect on these instances (only those with a matching port are used):"), BorderLayout.NORTH);
+        destChecklistPanel.add(checklistScroll, BorderLayout.CENTER);
+        destChecklistPanel.add(checklistButtons, BorderLayout.SOUTH);
+        destPanel.add(destChecklistPanel, BorderLayout.CENTER);
+        destPanel.setBorder(BorderFactory.createTitledBorder("Connect to"));
+
+        JPanel main = new JPanel(new BorderLayout(10, 10));
+        main.add(sourcePanel, BorderLayout.NORTH);
+        main.add(destPanel, BorderLayout.CENTER);
+
+        int result = JOptionPane.showConfirmDialog(parent, main, "Auto-Connect", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (result != JOptionPane.OK_OPTION) return null;
+
+        Endpoint source;
+        if (SRC_INSTANCE.equals(sourceKindBox.getSelectedItem())) {
+            Instance inst = (Instance) sourceInstanceBox.getSelectedItem();
+            Port port = (Port) sourceInstancePortBox.getSelectedItem();
+            if (inst == null || port == null) {
+                JOptionPane.showMessageDialog(parent, "Pick a source instance and port.", "Auto-Connect", JOptionPane.ERROR_MESSAGE);
+                return null;
+            }
+            source = Endpoint.instancePort(inst.id, port.name);
+        } else {
+            ExternalPort ep = (ExternalPort) sourceExternalBox.getSelectedItem();
+            if (ep == null) {
+                JOptionPane.showMessageDialog(parent, "Pick a source external port.", "Auto-Connect", JOptionPane.ERROR_MESSAGE);
+                return null;
+            }
+            source = Endpoint.external(ep.name);
+        }
+
+        String destName = destPortField.getText().trim();
+        if (destName.isEmpty()) {
+            JOptionPane.showMessageDialog(parent, "Enter a destination port name.", "Auto-Connect", JOptionPane.ERROR_MESSAGE);
+            return null;
+        }
+
+        Set<String> enabled = new LinkedHashSet<>();
+        for (Map.Entry<Instance, JCheckBox> e : instanceChecks.entrySet()) {
+            if (e.getValue().isSelected()) enabled.add(e.getKey().id);
+        }
+
+        AutoConnectRequest req = new AutoConnectRequest();
+        req.source = source;
+        req.destinationPortName = destName;
+        req.enabledInstanceIds = enabled;
+        return req;
     }
 }

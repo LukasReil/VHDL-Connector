@@ -925,6 +925,56 @@ public class CanvasPanel extends JPanel {
         if (made > 0) changed(); else repaint();
     }
 
+    /** Opens the auto-connect dialog and, if confirmed, wires the picked source signal to
+     *  the matching port on every enabled instance that has one. */
+    public void showAutoConnectDialog() {
+        if (project == null) return;
+        Dialogs.AutoConnectRequest req = Dialogs.promptAutoConnect(this, project);
+        if (req != null) autoConnect(req);
+    }
+
+    /** For every enabled instance with a port named req.destinationPortName, wires it to
+     *  req.source - unless that destination pin is already connected to something (left
+     *  alone, to avoid creating a multi-driven net) or the directions are incompatible.
+     *  The source instance itself (if the source is an instance port) is always skipped as
+     *  a destination, since connecting a pin to itself would be meaningless. */
+    private void autoConnect(Dialogs.AutoConnectRequest req) {
+        Port sourcePort = project.resolvePort(req.source);
+        if (sourcePort == null) {
+            status("Auto-connect: source port could not be resolved.");
+            return;
+        }
+
+        int connected = 0, alreadyWired = 0, incompatible = 0, noMatch = 0;
+        for (Instance inst : project.instances) {
+            if (!req.enabledInstanceIds.contains(inst.id)) continue;
+            if (req.source.kind == Endpoint.Kind.INSTANCE && inst.id.equals(req.source.instanceId)) continue;
+
+            VhdlEntity entity = project.getEntityForInstance(inst);
+            if (entity == null) continue;
+            Port destPort = entity.getPort(req.destinationPortName);
+            if (destPort == null) { noMatch++; continue; }
+
+            Endpoint dest = Endpoint.instancePort(inst.id, destPort.name);
+            if (project.isEndpointAlreadyConnected(dest)) { alreadyWired++; continue; }
+
+            boolean ok = (project.canDrive(req.source) && project.canReceive(dest)) || (project.canDrive(dest) && project.canReceive(req.source));
+            if (!ok) { incompatible++; continue; }
+
+            project.connections.add(new Connection(project.nextConnectionId(), req.source, dest, false));
+            connected++;
+        }
+
+        StringBuilder msg = new StringBuilder("Auto-connect '").append(req.destinationPortName).append("': ")
+                .append(connected).append(" connected");
+        if (alreadyWired > 0) msg.append(", ").append(alreadyWired).append(" already wired (left alone)");
+        if (incompatible > 0) msg.append(", ").append(incompatible).append(" incompatible direction");
+        if (noMatch > 0) msg.append(", ").append(noMatch).append(" without a matching port");
+        status(msg.toString());
+
+        if (connected > 0) { layoutChanged(); changed(); } else { repaint(); }
+    }
+
     private String describeDir(Endpoint e) {
         Port p = project.resolvePort(e);
         return p == null ? e.toString() : (e + " (" + p.direction.vhdl() + ")");

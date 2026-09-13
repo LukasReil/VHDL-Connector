@@ -51,6 +51,16 @@ small built-in reader/writer).
 - **Generics**: override an instance's generic values from the canvas.
 - **Direction-checked wiring**: the tool won't let you connect two outputs or
   two inputs together.
+- **Multi-select and copy/paste**: Ctrl+Click adds instances to a selection;
+  Ctrl+C/Ctrl+V copies them (with their generics and any connection directly
+  between two copied instances) and pastes new, uniquely-labeled instances.
+- **Auto-Connect** (`Edit > Auto-Connect...`): pick one source signal (an
+  instance's port, or an external port) and a destination port name, and it's
+  wired to every enabled instance that has a port with that name — handy for
+  broadcasting `clk`/`rst_n` to a whole design in one go. Instances can be
+  individually excluded from the sweep; a destination pin that's already
+  connected to something else is always left alone rather than rewired, so
+  auto-connect can never create a multi-driven net.
 - **Save/Open projects** as a self-contained `.json` file — the full library
   (including parsed port/generic data) is embedded, so re-opening a project
   doesn't require the original `.vhd` files to still be around. Each entity's
@@ -130,7 +140,8 @@ java -cp out vhdlconnector.Main
 7. External ports can be dragged anywhere on the canvas, just like instances;
    clicking precisely on the pin tip instead starts a wire.
 8. **Edit > Set Top Entity Name...** sets the name of the entity that will be
-   generated on export.
+   generated on export. **Edit > Auto-Connect...** opens the broadcast-connect
+   dialog described above.
 9. **File > Save Project** (`Ctrl+S`) **/ Save Project As...** (`Ctrl+Shift+S`)
    writes the whole design (library + instances + wiring) to a `.json` file.
    **File > Open Project...** (`Ctrl+O`) reloads it later, and **New Project**

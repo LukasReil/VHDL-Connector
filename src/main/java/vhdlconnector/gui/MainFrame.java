@@ -84,6 +84,7 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
 
         JMenu editMenu = new JMenu("Edit");
         editMenu.add(menuItem("Set Top Entity Name...", this::setTopEntityName));
+        editMenu.add(menuItem("Auto-Connect...", canvasPanel::showAutoConnectDialog));
 
         bar.add(fileMenu);
         bar.add(editMenu);
