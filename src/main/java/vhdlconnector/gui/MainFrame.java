@@ -9,6 +9,8 @@ import vhdlconnector.parser.VhdlEntityParser;
 import javax.swing.*;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.*;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
@@ -65,11 +67,13 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
     private JMenuBar buildMenuBar() {
         JMenuBar bar = new JMenuBar();
 
+        int shortcutMask = Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx();
+
         JMenu fileMenu = new JMenu("File");
-        fileMenu.add(menuItem("New Project", this::newProject));
-        fileMenu.add(menuItem("Open Project...", this::openProject));
-        fileMenu.add(menuItem("Save Project", this::saveProject));
-        fileMenu.add(menuItem("Save Project As...", this::saveProjectAs));
+        fileMenu.add(menuItem("New Project", this::newProject, KeyStroke.getKeyStroke(KeyEvent.VK_N, shortcutMask)));
+        fileMenu.add(menuItem("Open Project...", this::openProject, KeyStroke.getKeyStroke(KeyEvent.VK_O, shortcutMask)));
+        fileMenu.add(menuItem("Save Project", this::saveProject, KeyStroke.getKeyStroke(KeyEvent.VK_S, shortcutMask)));
+        fileMenu.add(menuItem("Save Project As...", this::saveProjectAs, KeyStroke.getKeyStroke(KeyEvent.VK_S, shortcutMask | InputEvent.SHIFT_DOWN_MASK)));
         fileMenu.addSeparator();
         fileMenu.add(menuItem("Import VHDL File...", this::importVhdlFiles));
         fileMenu.add(menuItem("Import VHDL Folder...", this::importFolder));
@@ -87,8 +91,13 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
     }
 
     private JMenuItem menuItem(String label, Runnable action) {
+        return menuItem(label, action, null);
+    }
+
+    private JMenuItem menuItem(String label, Runnable action, KeyStroke accelerator) {
         JMenuItem item = new JMenuItem(label);
         item.addActionListener(e -> action.run());
+        if (accelerator != null) item.setAccelerator(accelerator);
         return item;
     }
 

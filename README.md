@@ -121,9 +121,10 @@ java -cp out vhdlconnector.Main
    clicking precisely on the pin tip instead starts a wire.
 7. **Edit > Set Top Entity Name...** sets the name of the entity that will be
    generated on export.
-8. **File > Save Project / Save Project As...** writes the whole design
-   (library + instances + wiring) to a `.json` file. **File > Open Project...**
-   reloads it later.
+8. **File > Save Project** (`Ctrl+S`) **/ Save Project As...** (`Ctrl+Shift+S`)
+   writes the whole design (library + instances + wiring) to a `.json` file.
+   **File > Open Project...** (`Ctrl+O`) reloads it later, and **New Project**
+   (`Ctrl+N`) starts a fresh one.
 9. **File > Export VHDL...** writes out the generated top-level entity and
    architecture, ready to add to your VHDL sources.
 
