@@ -31,7 +31,10 @@ small built-in reader/writer).
   ever judges a particular pin unreachable under its own layout rules (rare,
   but geometrically possible in a tight layout), the connection still draws
   as a plain straight line rather than silently vanishing while remaining
-  "connected" underneath.
+  "connected" underneath. Two *unrelated* signals that happen to run along
+  the same line (as opposed to an intentional shared trunk) are nudged apart
+  into parallel lanes with a small jog, rather than being left drawn on top
+  of one another.
 - **Automatic AXI4-Stream grouping**: any run of ports ending in `_t<signal>`
   (`tdata`, `tvalid`, `tready`, `tlast`, `tkeep`, `tstrb`, `tid`, `tdest`,
   `tuser`) whose shared prefix contains an `axi`/`axis` token is detected and

@@ -177,6 +177,8 @@ public class CanvasPanel extends JPanel {
 
         router.reset();
         int fallbackUsed = 0;
+        int netId = 0;
+        LaneAssigner lanes = new LaneAssigner();
 
         List<Rectangle2D> obstacles = new ArrayList<>();
         for (Instance inst : project.instances) {
@@ -204,6 +206,7 @@ public class CanvasPanel extends JPanel {
             // 0-point "path", which draws nothing while the connection stays fully "connected"
             // in the model. A straight fallback line guarantees this can never go invisible.
             if (path == null || path.size() < 2) { path = java.util.Arrays.asList(p1, p2); fallbackUsed++; }
+            path = lanes.deconflict(path, netId++);
             for (Connection member : bundle) routedPaths.put(member.id, path);
             visualConnections.add(bundle.get(0));
         }
@@ -236,6 +239,7 @@ public class CanvasPanel extends JPanel {
             }
             if (resolvableConns.isEmpty()) continue;
             List<List<Point2D>> paths = router.route(sourcePoint, destPoints, obstacles, bounds);
+            int thisNetId = netId++;
             for (int i = 0; i < resolvableConns.size(); i++) {
                 // As above: the router reports a destination it can't reach under its own
                 // constraints as an empty list rather than null - e.g. two pins on the same
@@ -244,6 +248,11 @@ public class CanvasPanel extends JPanel {
                 // draw as something, even if not the fancy shared-trunk route.
                 List<Point2D> path = paths.get(i);
                 if (path == null || path.size() < 2) { path = java.util.Arrays.asList(sourcePoint, destPoints.get(i)); fallbackUsed++; }
+                // Every destination sharing this source is the same net (that's the whole
+                // point of the trunk-sharing above), so they must all be deconflicted under
+                // the same netId - otherwise two destinations that legitimately share a
+                // trunk would look like a conflict with each other and get needlessly split.
+                path = lanes.deconflict(path, thisNetId);
                 routedPaths.put(resolvableConns.get(i).id, path);
             }
             visualConnections.addAll(resolvableConns);
@@ -260,7 +269,8 @@ public class CanvasPanel extends JPanel {
             Point2D p1 = resolveEndpointPoint(c.a);
             Point2D p2 = resolveEndpointPoint(c.b);
             if (p1 == null || p2 == null) continue; // genuinely orphaned; pruned on the next pass
-            routedPaths.put(c.id, java.util.Arrays.asList(p1, p2));
+            List<Point2D> straight = lanes.deconflict(java.util.Arrays.asList(p1, p2), netId++);
+            routedPaths.put(c.id, straight);
             visualConnections.add(c);
         }
 
@@ -274,6 +284,83 @@ public class CanvasPanel extends JPanel {
             status(fallbackUsed + " connection" + (fallbackUsed == 1 ? "" : "s")
                     + " fell back to a straight line - the router couldn't fit its usual routed path for "
                     + (fallbackUsed == 1 ? "it" : "them") + " in the current layout.");
+        }
+    }
+
+    private static final double LANE_GAP = 6.0;
+
+    /** Nudges routed paths apart where two UNRELATED nets happen to run along the exact same
+     *  line, so they read as two distinct wires instead of one drawn on top of the other.
+     *  OrthogonalRouter's own congestion penalty already discourages this, but it's a soft
+     *  cost - if the clean detour is expensive enough (more bends, a longer run), it'll still
+     *  pick the overlapping option. This is a separate, purely cosmetic pass on top of
+     *  whatever the router decided: it never re-routes anything or knows about obstacles, it
+     *  just tracks which (orientation, coordinate, span) a given net has already put a segment
+     *  on and, when a later net's segment collides with an earlier net's on the same line,
+     *  shifts the later one sideways by inserting a small perpendicular jog around it.
+     *
+     *  Two segments from the SAME net (an intentional shared trunk - a bundle, or several
+     *  destinations fanning out from one driver) are deliberately left overlapping; only a
+     *  DIFFERENT net's segment triggers a shift. The very first and last segment of every
+     *  path are never touched, since those are the pin's own horizontal approach/exit and
+     *  must end exactly on the pin - only interior "trunk" segments are eligible, which is
+     *  also exactly where cross-net overlap is most visually noticeable. */
+    private static final class LaneAssigner {
+        // key "H:<y>" or "V:<x>" -> claims already made on that exact line: {start, end, netId, lane}
+        private final Map<String, List<double[]>> occupancy = new java.util.HashMap<>();
+
+        List<Point2D> deconflict(List<Point2D> path, int netId) {
+            if (path.size() < 4) return path; // no interior segment exists to shift (see class doc)
+            List<Point2D> result = new ArrayList<>(path);
+            int segments = result.size() - 1;
+            // walk backwards so inserting points never disturbs the indices still to be visited
+            for (int k = segments - 2; k >= 1; k--) {
+                Point2D pk = result.get(k), pk1 = result.get(k + 1);
+                boolean horizontal = Math.abs(pk.getY() - pk1.getY()) < 1e-6;
+                boolean vertical = Math.abs(pk.getX() - pk1.getX()) < 1e-6;
+                if (!horizontal && !vertical) continue; // shouldn't happen, but never mangle a diagonal
+                if (horizontal && Math.abs(pk.getX() - pk1.getX()) < 1e-6) continue; // zero-length, ignore
+                if (vertical && Math.abs(pk.getY() - pk1.getY()) < 1e-6) continue;
+
+                String key = horizontal ? ("H:" + Math.round(pk.getY() * 10)) : ("V:" + Math.round(pk.getX() * 10));
+                double start = horizontal ? Math.min(pk.getX(), pk1.getX()) : Math.min(pk.getY(), pk1.getY());
+                double end = horizontal ? Math.max(pk.getX(), pk1.getX()) : Math.max(pk.getY(), pk1.getY());
+                int lane = laneFor(key, start, end, netId);
+                if (lane == 0) continue; // first (or only) net on this line - no shift needed
+
+                double offset = LANE_GAP * lane;
+                if (horizontal) {
+                    result.add(k + 1, new Point2D.Double(pk1.getX(), pk1.getY() + offset));
+                    result.add(k + 1, new Point2D.Double(pk.getX(), pk.getY() + offset));
+                } else {
+                    result.add(k + 1, new Point2D.Double(pk1.getX() + offset, pk1.getY()));
+                    result.add(k + 1, new Point2D.Double(pk.getX() + offset, pk.getY()));
+                }
+            }
+            return result;
+        }
+
+        /** Returns which lane (0 = original position, 1/2/3... = progressively offset) this
+         *  net should use for a segment on the given line and span, registering the claim so
+         *  later calls see it. A net that already claimed an overlapping span on this exact
+         *  line (its own earlier destination in the same fan-out, most commonly) reuses its
+         *  existing lane rather than being treated as a new conflict. */
+        private int laneFor(String key, double start, double end, int netId) {
+            List<double[]> claims = occupancy.computeIfAbsent(key, k -> new ArrayList<>());
+            int maxLane = -1;
+            for (double[] claim : claims) {
+                // a strict ">" with a small margin, not "<=": two segments merely touching at
+                // a shared corner point (extremely common in orthogonal routing - two nets
+                // turning at the same grid intersection is normal, not an overlap) must not
+                // count as a conflict, or every path would get needlessly split into jogs.
+                boolean overlaps = Math.min(end, claim[1]) - Math.max(start, claim[0]) > 1.0;
+                if (!overlaps) continue;
+                if ((int) claim[2] == netId) return (int) claim[3];
+                maxLane = Math.max(maxLane, (int) claim[3]);
+            }
+            int lane = maxLane + 1;
+            claims.add(new double[]{start, end, netId, lane});
+            return lane;
         }
     }
 
