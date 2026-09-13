@@ -328,7 +328,18 @@ public class CanvasPanel extends JPanel {
                 int lane = laneFor(key, start, end, netId);
                 if (lane == 0) continue; // first (or only) net on this line - no shift needed
 
-                double offset = LANE_GAP * lane;
+                // Shift AWAY from where the path is coming from, never back toward it: the
+                // preceding segment (k-1, k) is perpendicular to this one and already tells us
+                // which way the path was travelling when it arrived at pk. Always adding a
+                // fixed positive offset ignored this, so a path arriving from the "positive"
+                // side got shifted BACKWARD into ground it had just covered - a visible
+                // backtrack/notch right where the jog was inserted, which is exactly the kind
+                // of stray-looking stub this was meant to avoid, not create.
+                Point2D pPrev = result.get(k - 1);
+                double sign = horizontal
+                        ? (pk.getY() >= pPrev.getY() ? 1.0 : -1.0)
+                        : (pk.getX() >= pPrev.getX() ? 1.0 : -1.0);
+                double offset = sign * LANE_GAP * lane;
                 if (horizontal) {
                     result.add(k + 1, new Point2D.Double(pk1.getX(), pk1.getY() + offset));
                     result.add(k + 1, new Point2D.Double(pk.getX(), pk.getY() + offset));
