@@ -10,15 +10,21 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Detects AXI4-Stream interfaces among an entity's ports purely by name convention:
- *  ports named "&lt;prefix&gt;_axis_t&lt;signal&gt;" (e.g. s_axis_tdata, s_axis_tvalid,
- *  s_axis_tready, m00_axis_tlast, ...) that share the same "&lt;prefix&gt;_axis" are
- *  grouped into a single logical interface. The "s" in "axis" is optional, since plenty
- *  of real-world cores drop it and just use "_axi_t..." (e.g. s_axi_tvalid). */
+ *  ports ending in "_t&lt;signal&gt;" (tdata, tvalid, tready, ...) whose remaining prefix
+ *  contains an "axi" or "axis" token and is otherwise identical are grouped into a single
+ *  logical interface, e.g. s_axis_tdata/s_axis_tvalid/s_axis_tready share prefix "s_axis".
+ *  The "s" in "axis" is optional, since plenty of real-world cores drop it and just use
+ *  "_axi_t..." (e.g. s_axi_tvalid). Xilinx-generated IP (.vho instantiation templates) adds
+ *  an extra qualifier between "axis" and the signal when a core has more than one interface
+ *  of the same role - e.g. floating-point add's two inputs are "s_axis_a_tdata" and
+ *  "s_axis_b_tdata", its output "m_axis_result_tdata" - so the whole prefix (not just the
+ *  "axi[s]" token itself) is what has to match for two ports to be considered the same
+ *  interface; "s_axis_a" and "s_axis_b" are two separate interfaces, not one. */
 public final class AxiStreamDetector {
     private AxiStreamDetector() {}
 
     private static final Pattern SIGNAL_PATTERN = Pattern.compile(
-            "^(.*_axi[s]?)_t(data|valid|ready|last|keep|strb|user|id|dest|wakeup)$",
+            "^(.+)_t(data|valid|ready|last|keep|strb|user|id|dest|wakeup)$",
             Pattern.CASE_INSENSITIVE);
 
     /** Returns detected groups, in first-appearance order. A group needs at least 2
@@ -35,6 +41,7 @@ public final class AxiStreamDetector {
             Matcher m = SIGNAL_PATTERN.matcher(p.name);
             if (!m.matches()) continue;
             String prefix = m.group(1);
+            if (!hasAxiToken(prefix)) continue;
             String key = prefix.toLowerCase();
             String suffix = m.group(2).toUpperCase();
             groups.computeIfAbsent(key, k -> new PortGroup(prefix)).signals.put(suffix, p);
@@ -47,10 +54,21 @@ public final class AxiStreamDetector {
     }
 
     /** The AXI-Stream interface prefix a port name belongs to (e.g. "s_axis" for
-     *  "s_axis_tdata"), or null if the name doesn't match the convention at all. */
+     *  "s_axis_tdata", "s_axis_a" for "s_axis_a_tdata"), or null if the name doesn't
+     *  match the convention at all (no "_t&lt;signal&gt;" ending, or no "axi"/"axis"
+     *  token anywhere in what's left). */
     public static String prefixOf(String portName) {
         Matcher m = SIGNAL_PATTERN.matcher(portName);
-        return m.matches() ? m.group(1) : null;
+        if (!m.matches()) return null;
+        String prefix = m.group(1);
+        return hasAxiToken(prefix) ? prefix : null;
+    }
+
+    private static boolean hasAxiToken(String prefix) {
+        for (String part : prefix.split("_")) {
+            if (part.equalsIgnoreCase("axi") || part.equalsIgnoreCase("axis")) return true;
+        }
+        return false;
     }
 
     /** Ports that are not part of any detected group. */

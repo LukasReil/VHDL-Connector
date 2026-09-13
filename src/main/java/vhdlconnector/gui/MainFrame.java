@@ -73,6 +73,7 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
         fileMenu.addSeparator();
         fileMenu.add(menuItem("Import VHDL File...", this::importVhdlFiles));
         fileMenu.add(menuItem("Import VHDL Folder...", this::importFolder));
+        fileMenu.add(menuItem("Import IP Folder...", this::importIpFolder));
         fileMenu.add(menuItem("Export VHDL...", this::exportVhdl));
         fileMenu.addSeparator();
         fileMenu.add(menuItem("Exit", this::exit));
@@ -153,31 +154,54 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
         }
     }
 
-    private ArrayList<File> getVhdlFilesFromFolder(File folder) {
-        ArrayList<File> vhdlFiles = new ArrayList<>();
+    /** Recursively collects every file under folder whose name ends with one of the given
+     *  (lowercase) extensions. Shared by the VHDL-folder and IP-folder imports. */
+    private ArrayList<File> findFilesRecursively(File folder, String... lowerCaseExtensions) {
+        ArrayList<File> found = new ArrayList<>();
         File[] files = folder.listFiles();
-        if (files == null) return vhdlFiles;
+        if (files == null) return found;
         for (File f : files) {
             if (f.isDirectory()) {
-                vhdlFiles.addAll(getVhdlFilesFromFolder(f));
-            } else if (f.getName().toLowerCase().endsWith(".vhd") || f.getName().toLowerCase().endsWith(".vhdl")) {
-                vhdlFiles.add(f);
+                found.addAll(findFilesRecursively(f, lowerCaseExtensions));
+            } else {
+                String lower = f.getName().toLowerCase();
+                for (String ext : lowerCaseExtensions) {
+                    if (lower.endsWith(ext)) { found.add(f); break; }
+                }
             }
         }
-        return vhdlFiles;
+        return found;
     }
 
     private void importFolder() {
         JFileChooser chooser = new JFileChooser();
         chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setDialogTitle("Select VHDL Folder");
         if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
         File folder = chooser.getSelectedFile();
-        ArrayList<File> vhdlFiles = getVhdlFilesFromFolder(folder);
-        if (vhdlFiles == null || vhdlFiles.size() == 0) {
+        ArrayList<File> vhdlFiles = findFilesRecursively(folder, ".vhd", ".vhdl");
+        if (vhdlFiles.isEmpty()) {
             JOptionPane.showMessageDialog(this, "No VHDL files found in the selected folder.", "Import Folder", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
-        addVhdlFiles(vhdlFiles.toArray(new File[0]));
+        importFiles(vhdlFiles.toArray(new File[0]), parser::parseFile);
+    }
+
+    /** Recursively imports Vivado-generated IP: an "IP folder" contains one subfolder per
+     *  core, each with a .vho instantiation template (component declaration + port map
+     *  template) rather than a full entity declaration - see VhdlEntityParser.parseVhoFile. */
+    private void importIpFolder() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setDialogTitle("Select IP Folder");
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File folder = chooser.getSelectedFile();
+        ArrayList<File> vhoFiles = findFilesRecursively(folder, ".vho");
+        if (vhoFiles.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "No .vho instantiation templates found in the selected folder.", "Import IP Folder", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        importFiles(vhoFiles.toArray(new File[0]), parser::parseVhoFile);
     }
 
     private void importVhdlFiles() {
@@ -185,18 +209,21 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
         chooser.setMultiSelectionEnabled(true);
         chooser.setFileFilter(new FileNameExtensionFilter("VHDL Source (*.vhd, *.vhdl)", "vhd", "vhdl"));
         if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        addVhdlFiles(chooser.getSelectedFiles());
+        importFiles(chooser.getSelectedFiles(), parser::parseFile);
     }
 
-    private void addVhdlFiles(File[] files) {
+    private interface EntityFileParser {
+        List<VhdlEntity> parse(File f) throws IOException;
+    }
 
+    private void importFiles(File[] files, EntityFileParser fileParser) {
         int imported = 0;
         StringBuilder errors = new StringBuilder();
         for (File f : files) {
             try {
-                List<VhdlEntity> entities = parser.parseFile(f);
+                List<VhdlEntity> entities = fileParser.parse(f);
                 if (entities.isEmpty()) {
-                    errors.append(f.getName()).append(": no entity declaration found\n");
+                    errors.append(f.getName()).append(": no entity/component declaration found\n");
                     continue;
                 }
                 for (VhdlEntity e : entities) {

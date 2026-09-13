@@ -14,22 +14,30 @@ small built-in reader/writer).
 - **Import VHDL entities** from `.vhd`/`.vhdl` files (or recursively from a
   whole folder) — the entity name, generics, and ports are parsed straight out
   of the `entity ... is ... end entity;` declaration.
+- **Import Vivado IP** from an IP folder (recursively, same as the VHDL folder
+  import): each core's `.vho` instantiation template — a `COMPONENT ... PORT
+  (...); END COMPONENT;` block plus a port-map template, as Vivado generates
+  next to a generated IP core — is parsed the same way a real entity would be.
 - **Canvas-based block design**: drag entities from the library onto the
   canvas, drag instances (and external ports) around, and connect ports by
   dragging from one pin to another. Wires are auto-routed at right angles
   around instance boxes rather than drawn straight through them, and signals
   fanning out from the same source pin (e.g. a shared `clk`) share a common
   trunk instead of being drawn as separate overlapping lines.
-- **Automatic AXI4-Stream grouping**: ports named `<prefix>_axis_t<signal>` or
-  `<prefix>_axi_t<signal>` (e.g. `s_axis_tdata`/`s_axis_tvalid`/`s_axis_tready`/
-  `s_axis_tlast`, or `m_axi_tdata`/...) are detected and collapsed into a
-  single bundled interface pin (`S_AXIS`/`M_AXIS`), so you drag one wire
-  instead of several. This applies both to ports coming from imported entities
-  *and* to external (top-level) ports you create yourself. Connecting two
-  interfaces wires every matching signal at once, rejects invalid
-  master-to-master / slave-to-slave connections, and the whole bundle behaves
-  as a single wire on the canvas (one thicker line, one "delete the whole
-  link" action) instead of one line per underlying signal.
+- **Automatic AXI4-Stream grouping**: any run of ports ending in `_t<signal>`
+  (`tdata`, `tvalid`, `tready`, `tlast`, `tkeep`, `tstrb`, `tid`, `tdest`,
+  `tuser`) whose shared prefix contains an `axi`/`axis` token is detected and
+  collapsed into a single bundled interface pin (`S_AXIS`/`M_AXIS`), so you
+  drag one wire instead of several — covering plain `s_axis_tdata`, the
+  `s`-less `s_axi_tdata`, and Vivado-generated IP's qualified names like
+  `s_axis_a_tdata`/`s_axis_b_tdata`/`m_axis_result_tdata` (a core with more
+  than one stream of the same role, correctly kept as separate interfaces
+  rather than merged into one). This applies both to ports coming from
+  imported entities/IP *and* to external (top-level) ports you create
+  yourself. Connecting two interfaces wires every matching signal at once,
+  rejects invalid master-to-master / slave-to-slave connections, and the
+  whole bundle behaves as a single wire on the canvas (one thicker line, one
+  "delete the whole link" action) instead of one line per underlying signal.
 - **External (top-level) ports**, created via a dialog with a type-specific
   form:
   - `std_logic` — just a direction.
@@ -85,8 +93,10 @@ java -cp out vhdlconnector.Main
 ## Usage
 
 1. **File > Import VHDL File...** (or **Import VHDL Folder...** to recursively
-   pull in every `.vhd`/`.vhdl` file under a directory). Parsed entities show
-   up in the **Entity Library** panel on the left.
+   pull in every `.vhd`/`.vhdl` file under a directory, or **Import IP
+   Folder...** to recursively pull in every `.vho` instantiation template
+   under a directory — e.g. Vivado's per-core `ip/<core>/<core>.vho` layout).
+   Parsed entities show up in the **Entity Library** panel on the left.
 2. Select an entity and click **Add to Canvas** (or double-click it) to place
    an instance. Drag the instance around the canvas to position it — wires
    attached to it reroute automatically around other instances.
@@ -127,8 +137,9 @@ src/main/java/vhdlconnector/
   model/    Project data model (VhdlEntity, Port, Instance, ExternalPort,
             Connection, Project) plus AXI-Stream detection (PortGroup,
             AxiStreamDetector)
-  parser/   VhdlEntityParser — extracts entity/generic/port declarations
-            from VHDL source
+  parser/   VhdlEntityParser — extracts entity/generic/port declarations from
+            VHDL source, or from a Vivado .vho IP instantiation template's
+            COMPONENT declaration
   json/     Minimal dependency-free JSON reader/writer
   io/       ProjectIO — saves/loads a Project as JSON, storing each entity's
             source .vhd path relative to the project file for portability

@@ -15,7 +15,9 @@ import java.util.regex.Pattern;
 /**
  * Extracts entity name / generics / ports from a VHDL source file. Only the
  * entity declaration is parsed (architecture bodies are ignored); this is
- * enough to instantiate and wire the entity elsewhere.
+ * enough to instantiate and wire the entity elsewhere. Also understands
+ * Vivado's .vho IP instantiation templates, which declare the same
+ * information via a COMPONENT block instead of a full entity.
  */
 public class VhdlEntityParser {
 
@@ -23,12 +25,27 @@ public class VhdlEntityParser {
             Pattern.compile("\\bentity\\s+(\\w+)\\s+is\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern ENTITY_END =
             Pattern.compile("\\bend\\b(\\s+entity)?(\\s+\\w+)?\\s*;", Pattern.CASE_INSENSITIVE);
+    private static final Pattern COMPONENT_START =
+            Pattern.compile("\\bcomponent\\s+(\\w+)(\\s+is)?\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern COMPONENT_END =
+            Pattern.compile("\\bend\\s+component\\b(\\s+\\w+)?\\s*;", Pattern.CASE_INSENSITIVE);
     private static final Pattern GENERIC_KW = Pattern.compile("\\bgeneric\\s*\\(", Pattern.CASE_INSENSITIVE);
     private static final Pattern PORT_KW = Pattern.compile("\\bport\\s*\\(", Pattern.CASE_INSENSITIVE);
 
     public List<VhdlEntity> parseFile(java.io.File file) throws IOException {
         String content = new String(Files.readAllBytes(file.toPath()));
         List<VhdlEntity> entities = parseSource(content);
+        for (VhdlEntity e : entities) e.sourceFile = file.getAbsolutePath();
+        return entities;
+    }
+
+    /** Parses a Vivado-generated .vho instantiation template: it declares the component
+     *  as "COMPONENT name [IS] ... PORT (...); END COMPONENT;" rather than a full entity,
+     *  but the generic/port clauses inside are the same shape, so this shares all of that
+     *  parsing logic with {@link #parseSource} - only the outer start/end markers differ. */
+    public List<VhdlEntity> parseVhoFile(java.io.File file) throws IOException {
+        String content = new String(Files.readAllBytes(file.toPath()));
+        List<VhdlEntity> entities = parseComponentTemplates(content);
         for (VhdlEntity e : entities) e.sourceFile = file.getAbsolutePath();
         return entities;
     }
@@ -47,27 +64,50 @@ public class VhdlEntityParser {
             if (!endMatcher.find(bodyStart)) break; // malformed, stop
             int bodyEnd = endMatcher.start();
 
-            String body = source.substring(bodyStart, bodyEnd);
             VhdlEntity entity = new VhdlEntity(name);
-
-            String genericClause = extractParenClause(body, GENERIC_KW);
-            if (genericClause != null) {
-                for (String decl : splitTopLevel(genericClause, ';')) {
-                    parseGenericDecl(decl, entity);
-                }
-            }
-
-            String portClause = extractParenClause(body, PORT_KW);
-            if (portClause != null) {
-                for (String decl : splitTopLevel(portClause, ';')) {
-                    parsePortDecl(decl, entity);
-                }
-            }
-
+            parseDeclarationBody(source.substring(bodyStart, bodyEnd), entity);
             result.add(entity);
             searchFrom = endMatcher.end();
         }
         return result;
+    }
+
+    public List<VhdlEntity> parseComponentTemplates(String rawSource) {
+        String source = stripComments(rawSource);
+        List<VhdlEntity> result = new ArrayList<>();
+
+        Matcher startMatcher = COMPONENT_START.matcher(source);
+        int searchFrom = 0;
+        while (startMatcher.find(searchFrom)) {
+            String name = startMatcher.group(1);
+            int bodyStart = startMatcher.end();
+
+            Matcher endMatcher = COMPONENT_END.matcher(source);
+            if (!endMatcher.find(bodyStart)) break; // malformed, stop
+            int bodyEnd = endMatcher.start();
+
+            VhdlEntity entity = new VhdlEntity(name);
+            parseDeclarationBody(source.substring(bodyStart, bodyEnd), entity);
+            result.add(entity);
+            searchFrom = endMatcher.end();
+        }
+        return result;
+    }
+
+    private void parseDeclarationBody(String body, VhdlEntity entity) {
+        String genericClause = extractParenClause(body, GENERIC_KW);
+        if (genericClause != null) {
+            for (String decl : splitTopLevel(genericClause, ';')) {
+                parseGenericDecl(decl, entity);
+            }
+        }
+
+        String portClause = extractParenClause(body, PORT_KW);
+        if (portClause != null) {
+            for (String decl : splitTopLevel(portClause, ';')) {
+                parsePortDecl(decl, entity);
+            }
+        }
     }
 
     private void parseGenericDecl(String decl, VhdlEntity entity) {
