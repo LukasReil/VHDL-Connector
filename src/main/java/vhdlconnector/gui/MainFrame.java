@@ -2,6 +2,7 @@ package vhdlconnector.gui;
 
 import vhdlconnector.export.VhdlExporter;
 import vhdlconnector.io.ProjectIO;
+import vhdlconnector.model.Instance;
 import vhdlconnector.model.Project;
 import vhdlconnector.model.VhdlEntity;
 import vhdlconnector.parser.VhdlEntityParser;
@@ -368,6 +369,60 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
     public void onViewRequested(String entityName) {
         VhdlEntity e = project.library.get(entityName);
         if (e != null) Dialogs.showEntitySummary(this, e);
+    }
+
+    @Override
+    public void onReloadRequested(String entityName) {
+        VhdlEntity old = project.library.get(entityName);
+        if (old == null) return;
+        if (old.sourceFile == null) {
+            JOptionPane.showMessageDialog(this,
+                    "Entity '" + entityName + "' has no known source file (it may have been loaded from " +
+                            "an older project file), so it cannot be reloaded.",
+                    "Cannot Reload", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        File f = new File(old.sourceFile);
+        if (!f.isFile()) {
+            JOptionPane.showMessageDialog(this,
+                    "Source file no longer exists:\n" + old.sourceFile,
+                    "Cannot Reload", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        try {
+            boolean isVho = f.getName().toLowerCase().endsWith(".vho");
+            List<VhdlEntity> parsed = isVho ? parser.parseVhoFile(f) : parser.parseFile(f);
+            VhdlEntity reloaded = null;
+            for (VhdlEntity e : parsed) {
+                if (e.name.equalsIgnoreCase(entityName)) { reloaded = e; break; }
+            }
+            if (reloaded == null) {
+                JOptionPane.showMessageDialog(this,
+                        "Entity '" + entityName + "' was not found in:\n" + f.getName() +
+                                "\nIt may have been renamed or removed in the source file.",
+                        "Cannot Reload", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            final VhdlEntity newEntity = reloaded;
+            project.library.put(entityName, newEntity);
+            for (Instance inst : project.instances) {
+                if (inst.entityName.equals(entityName)) {
+                    inst.genericOverrides.keySet().removeIf(key -> newEntity.getGeneric(key) == null);
+                }
+            }
+            libraryPanel.refresh(project);
+            dirty = true;
+            updateTitle();
+            status("Reloaded entity '" + entityName + "' from " + f.getName() + ".");
+            // a reload may have dropped or renamed a port that existing instances were
+            // wired to; this immediately cleans up any resulting stale connection (and
+            // reports it, taking over the status line above) the same way importFiles() does.
+            canvasPanel.layoutChanged();
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this,
+                    "Failed to reload '" + entityName + "':\n" + ex.getMessage(),
+                    "Reload Failed", JOptionPane.ERROR_MESSAGE);
+        }
     }
 
     // ---------------- CanvasPanel.Listener ----------------

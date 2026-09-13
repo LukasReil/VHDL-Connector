@@ -14,6 +14,7 @@ public class LibraryPanel extends JPanel {
         void onAddToCanvasRequested(String entityName);
         void onRemoveRequested(String entityName);
         void onViewRequested(String entityName);
+        void onReloadRequested(String entityName);
     }
 
     private final DefaultListModel<String> listModel = new DefaultListModel<>();
@@ -32,11 +33,14 @@ public class LibraryPanel extends JPanel {
         JButton importBtn = new JButton("Import VHDL File...");
         JButton addBtn = new JButton("Add to Canvas");
         JButton viewBtn = new JButton("View Entity");
+        JButton reloadBtn = new JButton("Reload Entity");
+        reloadBtn.setToolTipText("Re-parse this entity from its source file, to pick up changes you made outside this tool.");
         JButton removeBtn = new JButton("Remove from Library");
 
         importBtn.addActionListener(e -> { if (listener != null) listener.onImportRequested(); });
         addBtn.addActionListener(e -> withSelection(name -> listener.onAddToCanvasRequested(name)));
         viewBtn.addActionListener(e -> withSelection(name -> listener.onViewRequested(name)));
+        reloadBtn.addActionListener(e -> withSelection(name -> listener.onReloadRequested(name)));
         removeBtn.addActionListener(e -> withSelection(name -> listener.onRemoveRequested(name)));
         list.addMouseListener(new java.awt.event.MouseAdapter() {
             @Override
@@ -48,6 +52,7 @@ public class LibraryPanel extends JPanel {
         buttons.add(importBtn);
         buttons.add(addBtn);
         buttons.add(viewBtn);
+        buttons.add(reloadBtn);
         buttons.add(removeBtn);
         add(buttons, BorderLayout.SOUTH);
     }

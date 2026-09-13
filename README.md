@@ -22,6 +22,14 @@ small built-in reader/writer).
   import): each core's `.vho` instantiation template — a `COMPONENT ... PORT
   (...); END COMPONENT;` block plus a port-map template, as Vivado generates
   next to a generated IP core — is parsed the same way a real entity would be.
+- **Reload Entity**: select a library entity and click **Reload Entity** to
+  re-parse it from its original source file in place, picking up port/generic
+  changes made outside the tool without having to re-import and re-wire
+  everything by hand. Existing instances of that entity keep their position,
+  label, and generic overrides (an override for a generic that no longer
+  exists after the reload is dropped); a connection left dangling by a port
+  that was renamed or removed is cleaned up the same way a re-import handles
+  it.
 - **Canvas-based block design**: drag entities from the library onto the
   canvas, drag instances (and external ports) around, and connect ports by
   dragging from one pin to another. Wires are auto-routed at right angles
@@ -120,7 +128,10 @@ java -cp out vhdlconnector.Main
    pull in every `.vhd`/`.vhdl` file under a directory, or **Import IP
    Folder...** to recursively pull in every `.vho` instantiation template
    under a directory — e.g. Vivado's per-core `ip/<core>/<core>.vho` layout).
-   Parsed entities show up in the **Entity Library** panel on the left.
+   Parsed entities show up in the **Entity Library** panel on the left. If you
+   later edit an entity's source file outside this tool, select it in the
+   library and click **Reload Entity** to re-parse it in place instead of
+   re-importing and re-wiring it from scratch.
 2. Select an entity and click **Add to Canvas** (or double-click it) to place
    an instance. Drag the instance around the canvas to position it — wires
    attached to it reroute automatically around other instances.
