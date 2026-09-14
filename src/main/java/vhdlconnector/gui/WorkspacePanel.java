@@ -21,13 +21,18 @@ import java.util.List;
  *  sources etc. simply never get double-clicked rather than needing to be hidden. The user
  *  browses to whatever .vhd/.vhdl entity file or .vho IP instantiation template they want and
  *  instantiates it on demand (double-click, or the right-click menu), instead of the whole
- *  workspace being bulk-imported up front. */
+ *  workspace being bulk-imported up front. A .ecd file (Entity Connection Diagram - the
+ *  per-diagram project file, opened as its own tab) is a third, distinct file type: double-click
+ *  or right-click -> Open to load it as a tab, and right-click a folder for "New .ecd File..."
+ *  to create one there. */
 public class WorkspacePanel extends JPanel {
 
     public interface Listener {
         void onAddToCanvasRequested(File file);
         void onViewRequested(File file);
         void onReloadRequested(File file);
+        void onOpenDiagramRequested(File ecdFile);
+        void onNewDiagramRequested(File targetFolder, String chosenFileName);
     }
 
     /** Sentinel child placed under every not-yet-expanded directory node so its expand arrow
@@ -75,7 +80,9 @@ public class WorkspacePanel extends JPanel {
                 TreePath path = tree.getPathForLocation(e.getX(), e.getY());
                 if (path == null) return;
                 File f = fileAt(path);
-                if (f != null && f.isFile() && isEntityFile(f) && listener != null) listener.onAddToCanvasRequested(f);
+                if (f == null || !f.isFile() || listener == null) return;
+                if (isDiagramFile(f)) listener.onOpenDiagramRequested(f);
+                else if (isEntityFile(f)) listener.onAddToCanvasRequested(f);
             }
             @Override public void mousePressed(java.awt.event.MouseEvent e) { maybeShowPopup(e); }
             @Override public void mouseReleased(java.awt.event.MouseEvent e) { maybeShowPopup(e); }
@@ -92,9 +99,9 @@ public class WorkspacePanel extends JPanel {
     }
 
     /** Opens (or re-opens) the tree at the given folder. Pass null (or a path that no longer
-     *  exists on disk - e.g. a project's recorded workspaceRoot on a machine where that folder
+     *  exists on disk - e.g. a diagram's recorded workspaceRoot on a machine where that folder
      *  moved) to fall back to the empty-state card; this is deliberately silent, not an error
-     *  dialog, since it can legitimately happen on every "Open Project..." of a shared file. */
+     *  dialog, since it can legitimately happen whenever a .ecd/.json from elsewhere is opened. */
     public void setWorkspaceRoot(File root, Project project) {
         this.project = project;
         if (root == null || !root.isDirectory()) {
@@ -112,12 +119,21 @@ public class WorkspacePanel extends JPanel {
         cards.show(cardPanel, CARD_TREE);
     }
 
-    /** The library (or an entity's sourceFile) may have changed - e.g. after a reload -
-     *  independently of the workspace folder itself; call this so "Reload from Disk"
-     *  enablement (computed fresh whenever the popup is built) stays accurate. Does not
-     *  touch the tree structure, since library changes never add/remove files on disk. */
+    /** The library (or an entity's sourceFile) may have changed - e.g. after a reload, or the
+     *  user switching to a different open diagram tab - independently of the workspace folder
+     *  itself; call this so "Reload from Disk" enablement (computed fresh whenever the popup is
+     *  built) stays accurate for whichever diagram is currently active. Does not touch the tree
+     *  structure, since switching tabs never adds/removes files on disk. */
     public void setProject(Project project) {
         this.project = project;
+    }
+
+    /** Re-reads the given folder's children from disk - e.g. right after a new .ecd file was
+     *  created inside it, so it appears in the tree without a manual "Refresh". Purely a
+     *  tree-display refresh, no library/project side effects; a no-op if that folder isn't
+     *  currently present in the tree (not yet expanded, or under a different workspace root). */
+    public void refreshFolder(File folder) {
+        refreshNodeFor(folder);
     }
 
     private void showNoWorkspaceMessage(File missingRoot) {
@@ -169,9 +185,18 @@ public class WorkspacePanel extends JPanel {
     private JPopupMenu buildPopup(File f) {
         JPopupMenu menu = new JPopupMenu();
         if (f.isDirectory()) {
+            JMenuItem newDiagram = new JMenuItem("New .ecd File...");
+            newDiagram.addActionListener(a -> promptNewDiagram(f));
             JMenuItem refresh = new JMenuItem("Refresh");
             refresh.addActionListener(a -> refreshNodeFor(f));
+            menu.add(newDiagram);
             menu.add(refresh);
+            return menu;
+        }
+        if (isDiagramFile(f)) {
+            JMenuItem open = new JMenuItem("Open");
+            open.addActionListener(a -> { if (listener != null) listener.onOpenDiagramRequested(f); });
+            menu.add(open);
             return menu;
         }
         if (!isEntityFile(f)) return null;
@@ -186,6 +211,25 @@ public class WorkspacePanel extends JPanel {
         menu.add(view);
         menu.add(reload);
         return menu;
+    }
+
+    /** Prompts for a filename and, once it's confirmed not to already exist in that folder,
+     *  hands off actually creating+opening the file to the listener (MainFrame owns Project/
+     *  ProjectIO and tab management, not this panel). */
+    private void promptNewDiagram(File folder) {
+        Object result = JOptionPane.showInputDialog(this, "File name:", "New .ecd File",
+                JOptionPane.PLAIN_MESSAGE, null, null, "diagram.ecd");
+        if (result == null) return;
+        String name = result.toString().trim();
+        if (name.isEmpty()) return;
+        if (!name.toLowerCase().endsWith(".ecd")) name = name + ".ecd";
+        File target = new File(folder, name);
+        if (target.exists()) {
+            JOptionPane.showMessageDialog(this, "A file named '" + name + "' already exists in this folder.",
+                    "New .ecd File", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        if (listener != null) listener.onNewDiagramRequested(folder, name);
     }
 
     private boolean isReloadable(File f) {
@@ -222,6 +266,10 @@ public class WorkspacePanel extends JPanel {
         return n.endsWith(".vhd") || n.endsWith(".vhdl") || n.endsWith(".vho");
     }
 
+    private static boolean isDiagramFile(File f) {
+        return f.getName().toLowerCase().endsWith(".ecd");
+    }
+
     private static final class WorkspaceCellRenderer extends DefaultTreeCellRenderer {
         @Override
         public Component getTreeCellRendererComponent(JTree tree, Object value, boolean sel, boolean expanded,
@@ -232,8 +280,14 @@ public class WorkspacePanel extends JPanel {
                 File f = (File) uo;
                 boolean isRoot = value == tree.getModel().getRoot();
                 setText(isRoot ? f.getAbsolutePath() : f.getName());
-                setForeground(f.isFile() && !isEntityFile(f) ? new Color(160, 160, 160)
-                        : UIManager.getColor("Tree.textForeground"));
+                if (f.isFile() && isDiagramFile(f)) {
+                    setForeground(new Color(40, 110, 210));
+                    setFont(getFont().deriveFont(Font.BOLD));
+                } else if (f.isFile() && !isEntityFile(f)) {
+                    setForeground(new Color(160, 160, 160));
+                } else {
+                    setForeground(UIManager.getColor("Tree.textForeground"));
+                }
             } else if (uo == LOADING_PLACEHOLDER) {
                 setText("Loading...");
                 setForeground(new Color(160, 160, 160));

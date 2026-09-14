@@ -27,8 +27,21 @@ small built-in reader/writer).
   generic overrides; an override for a generic that no longer exists after
   the edit is dropped, and a connection left dangling by a renamed/removed
   port is cleaned up automatically). Right-click a folder (including the
-  workspace root) for **Refresh**, to pick up files added/removed on disk.
-  The opened folder is remembered in the project file.
+  workspace root) for **New .ecd File...** (see below) and **Refresh**, to
+  pick up files added/removed on disk.
+- **Tabbed diagrams (`.ecd` files)**: a diagram (library + instances + wiring)
+  is a `.ecd` file ("Entity Connection Diagram") that has to live somewhere
+  inside an open workspace folder. Right-click a folder in the workspace tree
+  and choose **New .ecd File...** to create one there (it's written to disk
+  immediately and opens as a new tab); double-click an existing `.ecd` file
+  (shown in bold blue in the tree) to open it, either into a new tab or, if
+  it's already open, by just switching to its existing tab. Several diagrams
+  can be open side by side, each in its own tab with its own undo-independent
+  canvas, library, and dirty state — editing one never touches another. The
+  workspace tree itself is shared across every open tab, not per-tab.
+  `File > Open Project... (.json)` is kept only for opening project files
+  saved by a version of this tool before `.ecd` existed; the format is
+  identical, so it opens into a tab exactly like a `.ecd` does.
 - **Missing source files are flagged, never silently dropped**: if an
   instantiated entity's source file goes missing (moved, deleted, an
   unmounted drive) since it was last read, every instance of it on the canvas
@@ -85,15 +98,15 @@ small built-in reader/writer).
   individually excluded from the sweep; a destination pin that's already
   connected to something else is always left alone rather than rewired, so
   auto-connect can never create a multi-driven net.
-- **Save/Open projects** as a self-contained `.json` file — the full library
-  (including parsed port/generic data) is embedded, so re-opening a project
+- **Save/Save As** a self-contained `.ecd`/`.json` file — the full library
+  (including parsed port/generic data) is embedded, so re-opening a diagram
   doesn't require the original `.vhd` files to still be around. Each entity's
-  source file is recorded *relative to the project file itself*, so a project
-  stays portable: moving or sharing the project folder together with its
+  source file is recorded *relative to the diagram file itself*, so a diagram
+  stays portable: moving or sharing the workspace folder together with its
   `.vhd` sources (e.g. via git) keeps those references correct, rather than
   pointing at one machine's absolute file layout. Project files saved by
   older versions of this tool (with an absolute source path) still load fine.
-  A project saved by a build old enough to have two connections sharing the
+  A diagram saved by a build old enough to have two connections sharing the
   same internal id (which made one silently render in place of the other) is
   repaired automatically on load, too.
 - **Export VHDL**: generates a top-level entity + architecture (with the
@@ -107,6 +120,9 @@ small built-in reader/writer).
   declarations are always valid VHDL rather than referencing an
   out-of-scope generic name. A width mismatch between two connected ports (or
   a generic with neither an override nor a default) is reported as a warning.
+  The first export on a tab asks where to save (defaulted next to that
+  tab's `.ecd` file); every export after that on the same tab writes straight
+  back to that same remembered path with no prompt.
 
 ## Requirements
 
@@ -132,12 +148,15 @@ java -cp out vhdlconnector.Main
 1. **File > Open Workspace Folder...** and pick the directory containing your
    VHDL sources and Vivado IP (e.g. your project's repo root — everything
    underneath is browsable, including simulation/testbench folders you simply
-   won't click into). Double-click a `.vhd`/`.vhdl` or `.vho` file in the
-   **Workspace** panel on the left (or right-click it and choose **Add to
-   Canvas**) to parse it and place an instance. If you later edit an entity's
-   source file outside this tool, right-click it in the tree and choose
-   **Reload from Disk** to re-parse it in place instead of re-wiring
-   everything from scratch.
+   won't click into). Right-click a folder in the **Workspace** panel on the
+   left and choose **New .ecd File...** to create a diagram there (or
+   double-click an existing `.ecd` file to open it) — a diagram has to live
+   inside the workspace before you can place anything on its canvas. Then
+   double-click a `.vhd`/`.vhdl` or `.vho` file (or right-click it and choose
+   **Add to Canvas**) to parse it and place an instance on the active tab. If
+   you later edit an entity's source file outside this tool, right-click it
+   in the tree and choose **Reload from Disk** to re-parse it in place
+   instead of re-wiring everything from scratch.
 2. Instances placed this way can be dragged around the canvas to position
    them — wires attached to an instance reroute automatically around other
    instances.
@@ -173,12 +192,13 @@ java -cp out vhdlconnector.Main
 8. **Edit > Set Top Entity Name...** sets the name of the entity that will be
    generated on export. **Edit > Auto-Connect...** opens the broadcast-connect
    dialog described above.
-9. **File > Save Project** (`Ctrl+S`) **/ Save Project As...** (`Ctrl+Shift+S`)
-   writes the whole design (library + instances + wiring) to a `.json` file.
-   **File > Open Project...** (`Ctrl+O`) reloads it later, and **New Project**
-   (`Ctrl+N`) starts a fresh one.
-10. **File > Export VHDL...** writes out the generated top-level entity and
-    architecture, ready to add to your VHDL sources.
+9. **File > Save** (`Ctrl+S`) **/ Save As...** (`Ctrl+Shift+S`) writes the
+   active tab's whole design (library + instances + wiring) back to its
+   `.ecd` file. **File > Close Tab** (`Ctrl+W`) closes the active tab,
+   prompting to save first if it has unsaved changes — the same prompt Exit
+   runs for every still-open tab.
+10. **File > Export VHDL...** writes out the active tab's generated
+    top-level entity and architecture, ready to add to your VHDL sources.
 
 Press **Delete** to remove whatever is currently selected (instance, external
 port, AXI-Stream interface, or connection/link).
@@ -194,12 +214,15 @@ src/main/java/vhdlconnector/
             VHDL source, or from a Vivado .vho IP instantiation template's
             COMPONENT declaration
   json/     Minimal dependency-free JSON reader/writer
-  io/       ProjectIO — saves/loads a Project as JSON, storing each entity's
-            source .vhd path relative to the project file for portability
+  io/       ProjectIO — saves/loads a Project as JSON (the .ecd/.json file
+            format), storing each entity's source .vhd path relative to the
+            project file for portability
   export/   VhdlExporter — generates the instantiated, wired VHDL output,
             resolving generic-dependent port widths per instance
-  gui/      MainFrame, LibraryPanel, CanvasPanel, Dialogs — the Swing UI;
-            OrthogonalRouter — obstacle-avoiding, trunk-sharing wire routing
+  gui/      MainFrame (tabbed diagrams, one Project+CanvasPanel per tab),
+            WorkspacePanel (the workspace file tree), CanvasPanel, Dialogs —
+            the Swing UI; OrthogonalRouter — obstacle-avoiding, trunk-sharing
+            wire routing
 ```
 
 ## Limitations

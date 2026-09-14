@@ -19,14 +19,60 @@ import java.io.IOException;
 import java.util.List;
 import java.util.ArrayList;
 
-public class MainFrame extends JFrame implements WorkspacePanel.Listener, CanvasPanel.Listener {
+/** Every diagram is a .ecd (Entity Connection Diagram) file that must live somewhere inside
+ *  an open workspace folder - created via the workspace tree's "New .ecd File..." and opened
+ *  by double-clicking it there, never as a free-floating in-memory scratch project - and each
+ *  open diagram gets its own tab (DiagramTab) with its own Project/CanvasPanel, so several can
+ *  be worked on side by side. The one exception is "Open Project... (.json)", kept purely to
+ *  open project files saved before this change; ProjectIO's format is identical either way, so
+ *  it opens into a tab exactly like a .ecd does. The workspace tree itself is shared/global
+ *  across all tabs, not per-tab. */
+public class MainFrame extends JFrame implements WorkspacePanel.Listener {
 
-    private Project project = new Project();
-    private File currentProjectFile;
-    private boolean dirty = false;
+    /** One open diagram: its own Project + CanvasPanel + backing file + dirty flag, plus the
+     *  export path remembered after the first "Export VHDL..." this session so later exports
+     *  on this tab don't prompt again. Implements CanvasPanel.Listener itself (rather than
+     *  MainFrame doing it for a single global project) so canvas edits mark exactly this tab
+     *  dirty and retitle exactly this tab, never some other open one. */
+    private final class DiagramTab implements CanvasPanel.Listener {
+        final Project project;
+        final CanvasPanel canvasPanel = new CanvasPanel();
+        File file; // always non-null once the tab exists - tabs can't exist without a backing file
+        boolean dirty;
+        File lastExportPath;
+
+        DiagramTab(Project project, File file) {
+            this.project = project;
+            this.file = file;
+            canvasPanel.setListener(this);
+            canvasPanel.setProject(project);
+        }
+
+        @Override
+        public void onProjectChanged() {
+            dirty = true;
+            refreshTabTitle(this);
+        }
+
+        @Override
+        public void onStatusMessage(String msg) {
+            status(msg);
+        }
+    }
+
+    private final List<DiagramTab> tabs = new ArrayList<>();
+    private final JTabbedPane tabbedPane = new JTabbedPane();
+    private final CardLayout canvasCards = new CardLayout();
+    private final JPanel canvasCardPanel = new JPanel(canvasCards);
+    private static final String CARD_EMPTY = "empty";
+    private static final String CARD_TABS = "tabs";
+
+    /** The folder currently browsed in the workspace tree - shared across all tabs, and
+     *  independent of any individual tab's Project.workspaceRoot (which just remembers, for
+     *  portability, which workspace a given .ecd was created under). */
+    private File workspaceFolder;
 
     private final WorkspacePanel workspacePanel = new WorkspacePanel();
-    private final CanvasPanel canvasPanel = new CanvasPanel();
     private final JLabel statusLabel = new JLabel(" ");
 
     private final VhdlEntityParser parser = new VhdlEntityParser();
@@ -39,11 +85,24 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
         setLocationRelativeTo(null);
 
         workspacePanel.setListener(this);
-        canvasPanel.setListener(this);
-        canvasPanel.setProject(project);
-        workspacePanel.setWorkspaceRoot(project.workspaceRoot != null ? new File(project.workspaceRoot) : null, project);
+        workspacePanel.setWorkspaceRoot(null, null);
 
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, workspacePanel, new JScrollPane(canvasPanel));
+        JLabel emptyCanvasLabel = new JLabel(
+                "<html><center>Open a workspace folder, then create or open a .ecd diagram file<br>to get started.</center></html>",
+                SwingConstants.CENTER);
+        emptyCanvasLabel.setForeground(new Color(130, 130, 130));
+        JPanel emptyCanvasPanel = new JPanel(new BorderLayout());
+        emptyCanvasPanel.add(emptyCanvasLabel, BorderLayout.CENTER);
+        canvasCardPanel.add(emptyCanvasPanel, CARD_EMPTY);
+        canvasCardPanel.add(tabbedPane, CARD_TABS);
+        canvasCards.show(canvasCardPanel, CARD_EMPTY);
+
+        tabbedPane.addChangeListener(e -> {
+            DiagramTab tab = activeTab();
+            workspacePanel.setProject(tab != null ? tab.project : null);
+        });
+
+        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, workspacePanel, canvasCardPanel);
         split.setDividerLocation(260);
 
         setJMenuBar(buildMenuBar());
@@ -59,8 +118,6 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
         addWindowListener(new WindowAdapter() {
             @Override public void windowClosing(WindowEvent e) { exit(); }
         });
-
-        updateTitle();
     }
 
     // ---------------- menu ----------------
@@ -71,10 +128,10 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
         int shortcutMask = Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx();
 
         JMenu fileMenu = new JMenu("File");
-        fileMenu.add(menuItem("New Project", this::newProject, KeyStroke.getKeyStroke(KeyEvent.VK_N, shortcutMask)));
-        fileMenu.add(menuItem("Open Project...", this::openProject, KeyStroke.getKeyStroke(KeyEvent.VK_O, shortcutMask)));
-        fileMenu.add(menuItem("Save Project", this::saveProject, KeyStroke.getKeyStroke(KeyEvent.VK_S, shortcutMask)));
-        fileMenu.add(menuItem("Save Project As...", this::saveProjectAs, KeyStroke.getKeyStroke(KeyEvent.VK_S, shortcutMask | InputEvent.SHIFT_DOWN_MASK)));
+        fileMenu.add(menuItem("Open Project... (.json)", this::openProject, KeyStroke.getKeyStroke(KeyEvent.VK_O, shortcutMask)));
+        fileMenu.add(menuItem("Save", this::saveProject, KeyStroke.getKeyStroke(KeyEvent.VK_S, shortcutMask)));
+        fileMenu.add(menuItem("Save As...", this::saveProjectAs, KeyStroke.getKeyStroke(KeyEvent.VK_S, shortcutMask | InputEvent.SHIFT_DOWN_MASK)));
+        fileMenu.add(menuItem("Close Tab", this::closeActiveTab, KeyStroke.getKeyStroke(KeyEvent.VK_W, shortcutMask)));
         fileMenu.addSeparator();
         fileMenu.add(menuItem("Open Workspace Folder...", this::openWorkspaceFolder));
         fileMenu.add(menuItem("Export VHDL...", this::exportVhdl));
@@ -83,7 +140,7 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
 
         JMenu editMenu = new JMenu("Edit");
         editMenu.add(menuItem("Set Top Entity Name...", this::setTopEntityName));
-        editMenu.add(menuItem("Auto-Connect...", canvasPanel::showAutoConnectDialog));
+        editMenu.add(menuItem("Auto-Connect...", this::showAutoConnectDialog));
 
         bar.add(fileMenu);
         bar.add(editMenu);
@@ -101,83 +158,147 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
         return item;
     }
 
-    // ---------------- project lifecycle ----------------
+    // ---------------- tab management ----------------
 
-    private void newProject() {
-        if (!confirmDiscardIfDirty()) return;
-        project = new Project();
-        currentProjectFile = null;
-        dirty = false;
-        canvasPanel.setProject(project);
-        workspacePanel.setWorkspaceRoot(null, project);
-        updateTitle();
-        status("New project created.");
+    private DiagramTab activeTab() {
+        int idx = tabbedPane.getSelectedIndex();
+        return idx >= 0 && idx < tabs.size() ? tabs.get(idx) : null;
     }
 
+    /** Opens `file` as a new tab, or just switches to it if a tab for that same file (compared
+     *  canonically) is already open - never a duplicate tab for one file. If no workspace is
+     *  currently browsed and this project remembers one that still exists on disk, adopts it
+     *  (mirrors the old single-project behavior of restoring the workspace on open, without
+     *  surprising the user by yanking the tree out from under an already-open workspace). */
+    private void openTab(Project project, File file) {
+        for (DiagramTab t : tabs) {
+            if (sameFile(t.file, file)) {
+                tabbedPane.setSelectedIndex(tabs.indexOf(t));
+                return;
+            }
+        }
+        DiagramTab tab = new DiagramTab(project, file);
+        tabs.add(tab);
+        tabbedPane.addTab(file.getName(), new JScrollPane(tab.canvasPanel));
+        tabbedPane.setSelectedIndex(tabs.size() - 1);
+        refreshTabTitle(tab);
+        updateEmptyState();
+        if (workspaceFolder == null && project.workspaceRoot != null && new File(project.workspaceRoot).isDirectory()) {
+            workspaceFolder = new File(project.workspaceRoot);
+            workspacePanel.setWorkspaceRoot(workspaceFolder, tab.project);
+        } else {
+            workspacePanel.setProject(tab.project);
+        }
+    }
+
+    private void refreshTabTitle(DiagramTab tab) {
+        int idx = tabs.indexOf(tab);
+        if (idx < 0) return;
+        tabbedPane.setTitleAt(idx, tab.file.getName() + (tab.dirty ? " *" : ""));
+    }
+
+    private void updateEmptyState() {
+        canvasCards.show(canvasCardPanel, tabs.isEmpty() ? CARD_EMPTY : CARD_TABS);
+    }
+
+    private void closeActiveTab() {
+        DiagramTab tab = activeTab();
+        if (tab != null) closeTab(tab);
+    }
+
+    /** Closes one tab after the same unsaved-changes confirmation used everywhere else.
+     *  Returns false if the user cancelled (tab stays open) - used by exit() to stop closing
+     *  the remaining tabs the moment one close is cancelled. */
+    private boolean closeTab(DiagramTab tab) {
+        int idx = tabs.indexOf(tab);
+        if (idx < 0) return true;
+        if (tabbedPane.getSelectedIndex() != idx) tabbedPane.setSelectedIndex(idx);
+        if (!confirmDiscardIfDirty(tab)) return false;
+        tabs.remove(idx);
+        tabbedPane.remove(idx);
+        updateEmptyState();
+        return true;
+    }
+
+    private static boolean sameFile(File a, File b) {
+        try {
+            return a.getCanonicalFile().equals(b.getCanonicalFile());
+        } catch (IOException ex) {
+            return a.getAbsoluteFile().equals(b.getAbsoluteFile());
+        }
+    }
+
+    // ---------------- project lifecycle ----------------
+
+    /** Legacy path: opens an old-format project .json (predating the .ecd/workspace-tree
+     *  workflow) as a new tab. Nothing is discarded/replaced by this - unlike the pre-tabs
+     *  "Open Project", it can no longer clobber whatever else is already open. */
     private void openProject() {
-        if (!confirmDiscardIfDirty()) return;
         JFileChooser chooser = new JFileChooser();
         chooser.setFileFilter(new FileNameExtensionFilter("VHDL Connector Project (*.json)", "json"));
-        if (currentProjectFile != null) chooser.setCurrentDirectory(currentProjectFile.getParentFile());
+        if (workspaceFolder != null) chooser.setCurrentDirectory(workspaceFolder);
         if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File f = chooser.getSelectedFile();
         try {
-            project = projectIO.load(chooser.getSelectedFile());
-            currentProjectFile = chooser.getSelectedFile();
-            dirty = false;
-            canvasPanel.setProject(project);
-            workspacePanel.setWorkspaceRoot(project.workspaceRoot != null ? new File(project.workspaceRoot) : null, project);
-            updateTitle();
-            status("Opened " + currentProjectFile.getName());
+            Project project = projectIO.load(f);
+            openTab(project, f);
+            status("Opened " + f.getName());
         } catch (IOException | RuntimeException ex) {
             JOptionPane.showMessageDialog(this, "Failed to open project:\n" + ex.getMessage(), "Open Project", JOptionPane.ERROR_MESSAGE);
         }
     }
 
-    /** Opens a folder as the project's workspace: the left panel becomes a browsable file
-     *  tree rooted there (see WorkspacePanel), replacing the old up-front bulk import - the
-     *  user instantiates entities from it on demand instead of the whole folder being scanned
-     *  and parsed immediately. */
+    /** Opens a folder as the workspace: the left panel becomes a browsable file tree rooted
+     *  there (see WorkspacePanel), shared by every open tab. Also stamps it onto the active
+     *  tab's Project.workspaceRoot (if any tab is active) so that saving it remembers the
+     *  association, the same way opening a workspace used to behave before there were tabs. */
     private void openWorkspaceFolder() {
         JFileChooser chooser = new JFileChooser();
         chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
         chooser.setDialogTitle("Open Workspace Folder");
-        if (project.workspaceRoot != null) chooser.setCurrentDirectory(new File(project.workspaceRoot));
+        if (workspaceFolder != null) chooser.setCurrentDirectory(workspaceFolder);
         if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
         File folder = chooser.getSelectedFile();
-        project.workspaceRoot = folder.getAbsolutePath();
-        workspacePanel.setWorkspaceRoot(folder, project);
-        dirty = true;
-        updateTitle();
+        workspaceFolder = folder;
+        DiagramTab tab = activeTab();
+        if (tab != null) {
+            tab.project.workspaceRoot = folder.getAbsolutePath();
+            tab.dirty = true;
+            refreshTabTitle(tab);
+        }
+        workspacePanel.setWorkspaceRoot(folder, tab != null ? tab.project : null);
         status("Opened workspace folder: " + folder.getAbsolutePath());
     }
 
     private void saveProject() {
-        if (currentProjectFile == null) {
-            saveProjectAs();
-            return;
-        }
-        doSave(currentProjectFile);
+        DiagramTab tab = activeTab();
+        if (tab == null) { status("Open or create a diagram first."); return; }
+        if (tab.file == null) { saveProjectAs(); return; } // defensive; a tab always has a backing file today
+        doSave(tab, tab.file);
     }
 
     private void saveProjectAs() {
+        DiagramTab tab = activeTab();
+        if (tab == null) { status("Open or create a diagram first."); return; }
         JFileChooser chooser = new JFileChooser();
-        chooser.setFileFilter(new FileNameExtensionFilter("VHDL Connector Project (*.json)", "json"));
-        if (currentProjectFile != null) chooser.setSelectedFile(currentProjectFile);
+        chooser.setFileFilter(new FileNameExtensionFilter("Entity Connection Diagram (*.ecd)", "ecd"));
+        chooser.setSelectedFile(tab.file);
         if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
         File f = chooser.getSelectedFile();
-        if (!f.getName().toLowerCase().endsWith(".json")) f = new File(f.getParentFile(), f.getName() + ".json");
-        doSave(f);
+        String lower = f.getName().toLowerCase();
+        if (!lower.endsWith(".ecd") && !lower.endsWith(".json")) f = new File(f.getParentFile(), f.getName() + ".ecd");
+        doSave(tab, f);
     }
 
-    private void doSave(File f) {
+    private void doSave(DiagramTab tab, File f) {
         try {
-            projectIO.save(project, f);
-            currentProjectFile = f;
-            dirty = false;
-            updateTitle();
+            projectIO.save(tab.project, f);
+            tab.file = f;
+            tab.dirty = false;
+            refreshTabTitle(tab);
             status("Saved " + f.getName());
         } catch (IOException ex) {
-            JOptionPane.showMessageDialog(this, "Failed to save project:\n" + ex.getMessage(), "Save Project", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Failed to save diagram:\n" + ex.getMessage(), "Save Diagram", JOptionPane.ERROR_MESSAGE);
         }
     }
 
@@ -189,11 +310,11 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
         return f.getName().toLowerCase().endsWith(".vho") ? parser.parseVhoFile(f) : parser.parseFile(f);
     }
 
-    /** Merges freshly parsed entities into the library, prompting on a name collision with
-     *  an existing (presumably different) entity - same conflict handling the old bulk
-     *  importer used. Returns only the entities actually merged in (a declined overwrite is
-     *  left out). */
-    private List<VhdlEntity> mergeIntoLibrary(List<VhdlEntity> parsed) {
+    /** Merges freshly parsed entities into the given tab's library, prompting on a name
+     *  collision with an existing (presumably different) entity - same conflict handling the
+     *  old bulk importer used. Returns only the entities actually merged in (a declined
+     *  overwrite is left out). */
+    private List<VhdlEntity> mergeIntoLibrary(Project project, List<VhdlEntity> parsed) {
         List<VhdlEntity> merged = new ArrayList<>();
         for (VhdlEntity e : parsed) {
             if (project.library.containsKey(e.name)) {
@@ -221,17 +342,35 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
         return null;
     }
 
+    /** First export on a tab prompts (defaulted next to that tab's file) and remembers the
+     *  chosen path; every export after that on the same tab writes straight there, silently. */
     private void exportVhdl() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setFileFilter(new FileNameExtensionFilter("VHDL Source (*.vhd)", "vhd"));
-        chooser.setSelectedFile(new File(project.topEntityName + ".vhd"));
-        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        File f = chooser.getSelectedFile();
-        if (!f.getName().toLowerCase().endsWith(".vhd") && !f.getName().toLowerCase().endsWith(".vhdl")) {
-            f = new File(f.getParentFile(), f.getName() + ".vhd");
+        DiagramTab tab = activeTab();
+        if (tab == null) { status("Open or create a diagram first."); return; }
+        File target = tab.lastExportPath;
+        if (target == null) {
+            JFileChooser chooser = new JFileChooser();
+            chooser.setFileFilter(new FileNameExtensionFilter("VHDL Source (*.vhd)", "vhd"));
+            File defaultDir = tab.file.getAbsoluteFile().getParentFile();
+            if (defaultDir != null) {
+                chooser.setCurrentDirectory(defaultDir);
+                chooser.setSelectedFile(new File(defaultDir, tab.project.topEntityName + ".vhd"));
+            } else {
+                chooser.setSelectedFile(new File(tab.project.topEntityName + ".vhd"));
+            }
+            if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+            File f = chooser.getSelectedFile();
+            String lower = f.getName().toLowerCase();
+            if (!lower.endsWith(".vhd") && !lower.endsWith(".vhdl")) f = new File(f.getParentFile(), f.getName() + ".vhd");
+            target = f;
+            tab.lastExportPath = f;
         }
+        doExport(tab, target);
+    }
+
+    private void doExport(DiagramTab tab, File f) {
         VhdlExporter exporter = new VhdlExporter();
-        VhdlExporter.Result result = exporter.generate(project);
+        VhdlExporter.Result result = exporter.generate(tab.project);
         try {
             java.nio.file.Files.write(f.toPath(), result.vhdl.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             status("Exported " + f.getName() + (result.warnings.isEmpty() ? "" : (" (" + result.warnings.size() + " warning(s))")));
@@ -244,40 +383,45 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
     }
 
     private void setTopEntityName() {
-        String name = Dialogs.promptString(this, "Top Entity Name", "Name of the generated entity:", project.topEntityName);
+        DiagramTab tab = activeTab();
+        if (tab == null) { status("Open or create a diagram first."); return; }
+        String name = Dialogs.promptString(this, "Top Entity Name", "Name of the generated entity:", tab.project.topEntityName);
         if (name != null && !name.trim().isEmpty()) {
-            project.topEntityName = name.trim();
-            dirty = true;
-            updateTitle();
+            tab.project.topEntityName = name.trim();
+            tab.dirty = true;
+            refreshTabTitle(tab);
         }
     }
 
+    private void showAutoConnectDialog() {
+        DiagramTab tab = activeTab();
+        if (tab == null) { status("Open or create a diagram first."); return; }
+        tab.canvasPanel.showAutoConnectDialog();
+    }
+
     private void exit() {
-        if (!confirmDiscardIfDirty()) return;
+        for (DiagramTab tab : new ArrayList<>(tabs)) {
+            if (!closeTab(tab)) return;
+        }
         dispose();
         System.exit(0);
     }
 
-    private boolean confirmDiscardIfDirty() {
-        if (!dirty) return true;
+    private boolean confirmDiscardIfDirty(DiagramTab tab) {
+        if (!tab.dirty) return true;
         int choice = JOptionPane.showConfirmDialog(this,
-                "You have unsaved changes. Save them before exiting?", "Unsaved Changes",
+                "'" + tab.file.getName() + "' has unsaved changes. Save them before closing?", "Unsaved Changes",
                 JOptionPane.YES_NO_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
         if (choice == JOptionPane.CANCEL_OPTION) {
             return false;
         }
         if (choice == JOptionPane.YES_OPTION) {
-            saveProject();
-            return !dirty; // if still dirty, user cancelled save dialog
+            doSave(tab, tab.file);
+            return !tab.dirty; // if still dirty, user cancelled the save dialog
         }
 
         // user chose "No" - discard changes
         return true;
-    }
-
-    private void updateTitle() {
-        String name = currentProjectFile != null ? currentProjectFile.getName() : "Untitled";
-        setTitle("VHDL Connector - " + name + (dirty ? " *" : ""));
     }
 
     private void status(String msg) {
@@ -288,6 +432,8 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
 
     @Override
     public void onAddToCanvasRequested(File file) {
+        DiagramTab tab = activeTab();
+        if (tab == null) { status("Open or create a diagram first."); return; }
         List<VhdlEntity> parsed;
         try {
             parsed = parseWorkspaceFile(file);
@@ -301,28 +447,28 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
                     "Add to Canvas", JOptionPane.WARNING_MESSAGE);
             return;
         }
-        List<VhdlEntity> merged = mergeIntoLibrary(parsed);
+        List<VhdlEntity> merged = mergeIntoLibrary(tab.project, parsed);
         if (merged.isEmpty()) {
             status("No entity added from " + file.getName() + ".");
             return;
         }
-        workspacePanel.setProject(project);
-        dirty = true;
-        updateTitle();
+        workspacePanel.setProject(tab.project);
+        tab.dirty = true;
+        refreshTabTitle(tab);
         VhdlEntity toPlace = chooseEntity(merged, "place");
         if (toPlace == null) {
             status("Merged " + merged.size() + " entit" + (merged.size() == 1 ? "y" : "ies") + " from "
                     + file.getName() + " into the library; none placed.");
             return;
         }
-        canvasPanel.addInstanceAtDefaultPosition(toPlace.name);
+        tab.canvasPanel.addInstanceAtDefaultPosition(toPlace.name);
         status("Instantiated '" + toPlace.name + "' from " + file.getName() + ".");
         // merging may have overwritten an existing entity with a different port set; this
         // immediately cleans up any resulting stale connection on other instances of it
         // (and reports it, taking over the status line above) rather than leaving it
         // silently blocking a pin until some unrelated canvas action happens to trigger
         // the same cleanup.
-        canvasPanel.layoutChanged();
+        tab.canvasPanel.layoutChanged();
     }
 
     @Override
@@ -346,20 +492,50 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
 
     @Override
     public void onReloadRequested(File file) {
+        DiagramTab tab = activeTab();
+        if (tab == null) return; // the context-menu item is only enabled when the active tab's library already matched this file
         String abs = file.getAbsolutePath();
         VhdlEntity old = null;
-        for (VhdlEntity e : project.library.values()) {
+        for (VhdlEntity e : tab.project.library.values()) {
             if (abs.equals(e.sourceFile)) { old = e; break; }
         }
         if (old == null) return; // "Reload from Disk" is disabled in this case; nothing to do
-        reloadEntityFromDisk(old);
+        reloadEntityFromDisk(tab, old);
+    }
+
+    @Override
+    public void onOpenDiagramRequested(File ecdFile) {
+        try {
+            Project project = projectIO.load(ecdFile);
+            openTab(project, ecdFile);
+            status("Opened " + ecdFile.getName());
+        } catch (IOException | RuntimeException ex) {
+            JOptionPane.showMessageDialog(this, "Failed to open diagram:\n" + ex.getMessage(), "Open Diagram", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    @Override
+    public void onNewDiagramRequested(File targetFolder, String chosenFileName) {
+        File target = new File(targetFolder, chosenFileName);
+        Project project = new Project();
+        if (workspaceFolder != null) project.workspaceRoot = workspaceFolder.getAbsolutePath();
+        try {
+            projectIO.save(project, target);
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this, "Failed to create diagram file:\n" + ex.getMessage(),
+                    "New Diagram", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        workspacePanel.refreshFolder(targetFolder);
+        openTab(project, target);
+        status("Created " + target.getName());
     }
 
     /** Re-parses an already-in-the-library entity from its recorded source file and swaps it
      *  in under the same name, so existing instances keep their position, label, and generic
      *  overrides (an override for a generic that no longer exists after the edit is dropped).
      *  Used by "Reload from Disk" in the workspace tree's context menu. */
-    private void reloadEntityFromDisk(VhdlEntity old) {
+    private void reloadEntityFromDisk(DiagramTab tab, VhdlEntity old) {
         String entityName = old.name;
         File f = new File(old.sourceFile);
         if (!f.isFile()) {
@@ -381,20 +557,20 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
                 return;
             }
             final VhdlEntity newEntity = reloaded;
-            project.library.put(entityName, newEntity);
-            for (Instance inst : project.instances) {
+            tab.project.library.put(entityName, newEntity);
+            for (Instance inst : tab.project.instances) {
                 if (inst.entityName.equals(entityName)) {
                     inst.genericOverrides.keySet().removeIf(key -> newEntity.getGeneric(key) == null);
                 }
             }
-            workspacePanel.setProject(project);
-            dirty = true;
-            updateTitle();
+            workspacePanel.setProject(tab.project);
+            tab.dirty = true;
+            refreshTabTitle(tab);
             status("Reloaded entity '" + entityName + "' from " + f.getName() + ".");
             // a reload may have dropped or renamed a port that existing instances were
             // wired to; this immediately cleans up any resulting stale connection (and
             // reports it, taking over the status line above) the same way a fresh merge does.
-            canvasPanel.layoutChanged();
+            tab.canvasPanel.layoutChanged();
         } catch (IOException ex) {
             JOptionPane.showMessageDialog(this,
                     "Failed to reload '" + entityName + "':\n" + ex.getMessage(),
@@ -402,16 +578,4 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener, Canvas
         }
     }
 
-    // ---------------- CanvasPanel.Listener ----------------
-
-    @Override
-    public void onProjectChanged() {
-        dirty = true;
-        updateTitle();
-    }
-
-    @Override
-    public void onStatusMessage(String msg) {
-        status(msg);
-    }
 }
