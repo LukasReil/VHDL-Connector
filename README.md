@@ -27,8 +27,14 @@ small built-in reader/writer).
   generic overrides; an override for a generic that no longer exists after
   the edit is dropped, and a connection left dangling by a renamed/removed
   port is cleaned up automatically). Right-click a folder (including the
-  workspace root) for **New .ecd File...** (see below) and **Refresh**, to
-  pick up files added/removed on disk.
+  workspace root) for **New .ecd File...** (see below) and **Refresh**.
+  Refresh is rarely needed, though: every folder you've expanded is watched
+  for filesystem changes automatically (files/folders appearing or
+  disappearing — from Vivado regenerating IP, `git checkout`, an editor, etc.
+  — not just changes made through this app), so the tree stays in sync on its
+  own, without collapsing folders you already have open elsewhere in the
+  tree. An unexpanded folder doesn't need watching — it always shows current
+  disk contents the moment you first open it.
 - **Tabbed diagrams (`.ecd` files)**: a diagram (library + instances + wiring)
   is a `.ecd` file ("Entity Connection Diagram") that has to live somewhere
   inside an open workspace folder. Right-click a folder in the workspace tree

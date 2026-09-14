@@ -12,9 +12,19 @@ import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
 import java.awt.*;
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.ClosedWatchServiceException;
+import java.nio.file.FileSystems;
+import java.nio.file.StandardWatchEventKinds;
+import java.nio.file.WatchKey;
+import java.nio.file.WatchService;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /** Left-hand panel: a lazily-loaded filesystem tree rooted at the currently open workspace
  *  folder. Every file is shown - nothing is pre-filtered by folder role, since simulation
@@ -24,7 +34,15 @@ import java.util.List;
  *  workspace being bulk-imported up front. A .ecd file (Entity Connection Diagram - the
  *  per-diagram project file, opened as its own tab) is a third, distinct file type: double-click
  *  or right-click -> Open to load it as a tab, and right-click a folder for "New .ecd File..."
- *  to create one there. */
+ *  to create one there.
+ *
+ *  Every directory the user has actually expanded is watched (java.nio.file.WatchService) for
+ *  files/folders appearing or disappearing, so the tree reflects changes made outside the app -
+ *  by Vivado, git, a text editor, etc. - without a manual "Refresh". Unexpanded folders don't
+ *  need watching: they always list() fresh the moment they're first opened. A folder that isn't
+ *  expanded yet (still showing the loading placeholder) is left untouched by a refresh, and an
+ *  expanded folder's own expanded subfolders keep their state across a refresh of an ancestor -
+ *  only what actually changed on disk is added, removed, or re-fetched. */
 public class WorkspacePanel extends JPanel {
 
     public interface Listener {
@@ -52,6 +70,16 @@ public class WorkspacePanel extends JPanel {
 
     private Listener listener;
     private Project project; // only consulted to decide whether "Reload from Disk" applies to a given file
+
+    // Filesystem auto-refresh: one watch per expanded directory node. watchService is null
+    // (feature silently unavailable, manual Refresh still works) if the platform can't provide
+    // one. pendingRefresh + refreshDebounceTimer coalesce a burst of events (e.g. many files
+    // changing at once) into a single tree update per settled directory instead of one per event.
+    private WatchService watchService;
+    private final Map<WatchKey, DefaultMutableTreeNode> watchKeyToNode = new HashMap<>();
+    private final Map<DefaultMutableTreeNode, WatchKey> nodeToWatchKey = new HashMap<>();
+    private final Set<DefaultMutableTreeNode> pendingRefresh = new HashSet<>();
+    private final Timer refreshDebounceTimer = new Timer(250, e -> flushPendingRefreshes());
 
     public WorkspacePanel() {
         super(new BorderLayout(4, 4));
@@ -93,6 +121,16 @@ public class WorkspacePanel extends JPanel {
         cardPanel.add(new JScrollPane(tree), CARD_TREE);
         cards.show(cardPanel, CARD_EMPTY);
         add(cardPanel, BorderLayout.CENTER);
+
+        refreshDebounceTimer.setRepeats(false);
+        try {
+            watchService = FileSystems.getDefault().newWatchService();
+            Thread watchThread = new Thread(this::watchLoop, "workspace-fs-watch");
+            watchThread.setDaemon(true);
+            watchThread.start();
+        } catch (IOException ex) {
+            watchService = null; // auto-refresh unavailable on this platform; manual Refresh still works
+        }
     }
 
     public void setListener(Listener listener) {
@@ -105,6 +143,7 @@ public class WorkspacePanel extends JPanel {
      *  dialog, since it can legitimately happen whenever a .ecd/.json from elsewhere is opened. */
     public void setWorkspaceRoot(File root, Project project) {
         this.project = project;
+        unregisterAllWatches();
         if (root == null || !root.isDirectory()) {
             rootNode.setUserObject("(no workspace)");
             rootNode.removeAllChildren();
@@ -147,11 +186,23 @@ public class WorkspacePanel extends JPanel {
     }
 
     private void lazyLoad(DefaultMutableTreeNode node) {
-        if (node.getChildCount() == 1 && ((DefaultMutableTreeNode) node.getChildAt(0)).getUserObject() == LOADING_PLACEHOLDER) {
-            loadChildren(node);
-        }
+        if (isUnloadedPlaceholder(node)) loadChildren(node);
     }
 
+    private static boolean isUnloadedPlaceholder(DefaultMutableTreeNode node) {
+        return node.getChildCount() == 1 && ((DefaultMutableTreeNode) node.getChildAt(0)).getUserObject() == LOADING_PLACEHOLDER;
+    }
+
+    private static List<File> sortEntries(File[] kids) {
+        List<File> sorted = new ArrayList<>(java.util.Arrays.asList(kids));
+        sorted.sort(Comparator.<File, Boolean>comparing(f -> !f.isDirectory())
+                .thenComparing(f -> f.getName().toLowerCase()));
+        return sorted;
+    }
+
+    /** Cold (re)load of a directory node's children - discards whatever was there before, so
+     *  any previously-expanded grandchildren collapse back to lazy. Used for the initial load
+     *  of a just-expanded (placeholder) node, where there's nothing worth preserving yet. */
     private void loadChildren(DefaultMutableTreeNode node) {
         node.removeAllChildren();
         Object uo = node.getUserObject();
@@ -159,15 +210,52 @@ public class WorkspacePanel extends JPanel {
         if (dir != null) {
             File[] kids = dir.listFiles();
             if (kids != null) {
-                List<File> sorted = new ArrayList<>(java.util.Arrays.asList(kids));
-                sorted.sort(Comparator.<File, Boolean>comparing(f -> !f.isDirectory())
-                        .thenComparing(f -> f.getName().toLowerCase()));
-                for (File f : sorted) {
+                for (File f : sortEntries(kids)) {
                     DefaultMutableTreeNode child = new DefaultMutableTreeNode(f);
                     if (f.isDirectory()) child.add(new DefaultMutableTreeNode(LOADING_PLACEHOLDER));
                     node.add(child);
                 }
             }
+            registerWatch(node, dir);
+        }
+        treeModel.nodeStructureChanged(node);
+    }
+
+    /** Re-reads an already-loaded directory node's children, reusing the same child TreeNode
+     *  instances for entries that are still present (so JTree keeps their expansion/loaded state
+     *  intact - refreshing a folder never collapses an already-open subfolder just because a
+     *  sibling changed) and only adding/removing nodes for what actually changed on disk. A
+     *  not-yet-expanded (placeholder) node is left alone - it'll list() fresh the moment it's
+     *  first opened regardless, so there's nothing to reconcile. */
+    private void refreshChildrenPreservingState(DefaultMutableTreeNode node) {
+        Object uo = node.getUserObject();
+        File dir = uo instanceof File ? (File) uo : null;
+        if (dir == null || !dir.isDirectory() || isUnloadedPlaceholder(node)) return;
+        File[] kids = dir.listFiles();
+        if (kids == null) return; // dir just became inaccessible; leave the tree showing its last known state
+
+        Map<String, DefaultMutableTreeNode> existingByPath = new HashMap<>();
+        for (int i = 0; i < node.getChildCount(); i++) {
+            DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i);
+            if (child.getUserObject() instanceof File) {
+                existingByPath.put(((File) child.getUserObject()).getAbsolutePath(), child);
+            }
+        }
+
+        Set<String> stillPresent = new HashSet<>();
+        node.removeAllChildren();
+        for (File f : sortEntries(kids)) {
+            String path = f.getAbsolutePath();
+            stillPresent.add(path);
+            DefaultMutableTreeNode child = existingByPath.get(path);
+            if (child == null) {
+                child = new DefaultMutableTreeNode(f);
+                if (f.isDirectory()) child.add(new DefaultMutableTreeNode(LOADING_PLACEHOLDER));
+            }
+            node.add(child);
+        }
+        for (Map.Entry<String, DefaultMutableTreeNode> entry : existingByPath.entrySet()) {
+            if (!stillPresent.contains(entry.getKey())) unregisterWatch(entry.getValue());
         }
         treeModel.nodeStructureChanged(node);
     }
@@ -247,7 +335,73 @@ public class WorkspacePanel extends JPanel {
 
     private void refreshNodeFor(File dir) {
         DefaultMutableTreeNode node = findNode(rootNode, dir);
-        if (node != null) loadChildren(node);
+        if (node == null) return;
+        if (isUnloadedPlaceholder(node)) loadChildren(node);
+        else refreshChildrenPreservingState(node);
+    }
+
+    // ---------------- filesystem auto-refresh ----------------
+
+    private void registerWatch(DefaultMutableTreeNode node, File dir) {
+        if (watchService == null || nodeToWatchKey.containsKey(node)) return;
+        try {
+            WatchKey key = dir.toPath().register(watchService,
+                    StandardWatchEventKinds.ENTRY_CREATE, StandardWatchEventKinds.ENTRY_DELETE);
+            watchKeyToNode.put(key, node);
+            nodeToWatchKey.put(node, key);
+        } catch (IOException ex) {
+            // can't watch this directory (permissions, unsupported filesystem, ...) - the tree
+            // still works, it just won't auto-refresh for changes made under it
+        }
+    }
+
+    private void unregisterWatch(DefaultMutableTreeNode node) {
+        WatchKey key = nodeToWatchKey.remove(node);
+        if (key != null) {
+            key.cancel();
+            watchKeyToNode.remove(key);
+        }
+    }
+
+    private void unregisterAllWatches() {
+        for (WatchKey key : watchKeyToNode.keySet()) key.cancel();
+        watchKeyToNode.clear();
+        nodeToWatchKey.clear();
+        pendingRefresh.clear();
+    }
+
+    /** Runs on a dedicated daemon thread for the panel's lifetime, blocking on watchService.take()
+     *  between filesystem events. Never touches Swing state directly - every reaction is handed
+     *  to the EDT via invokeLater, same as any other background-thread-to-UI handoff. */
+    private void watchLoop() {
+        while (true) {
+            WatchKey key;
+            try {
+                key = watchService.take();
+            } catch (InterruptedException | ClosedWatchServiceException ex) {
+                return;
+            }
+            key.pollEvents(); // contents don't matter - a refresh just re-lists the directory
+            boolean valid = key.reset();
+            SwingUtilities.invokeLater(() -> handleWatchSignal(key, valid));
+        }
+    }
+
+    private void handleWatchSignal(WatchKey key, boolean stillValid) {
+        DefaultMutableTreeNode node = watchKeyToNode.get(key);
+        if (node == null) return; // stale signal for a watch that's since been torn down (e.g. workspace switched)
+        if (!stillValid) {
+            unregisterWatch(node);
+            if (node == rootNode) setWorkspaceRoot(null, project); // the workspace folder itself vanished
+            return;
+        }
+        pendingRefresh.add(node);
+        refreshDebounceTimer.restart();
+    }
+
+    private void flushPendingRefreshes() {
+        for (DefaultMutableTreeNode node : pendingRefresh) refreshChildrenPreservingState(node);
+        pendingRefresh.clear();
     }
 
     private DefaultMutableTreeNode findNode(DefaultMutableTreeNode node, File target) {
