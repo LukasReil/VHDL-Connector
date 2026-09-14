@@ -33,15 +33,19 @@ small built-in reader/writer).
   is a `.ecd` file ("Entity Connection Diagram") that has to live somewhere
   inside an open workspace folder. Right-click a folder in the workspace tree
   and choose **New .ecd File...** to create one there (it's written to disk
-  immediately and opens as a new tab); double-click an existing `.ecd` file
-  (shown in bold blue in the tree) to open it, either into a new tab or, if
-  it's already open, by just switching to its existing tab. Several diagrams
-  can be open side by side, each in its own tab with its own undo-independent
-  canvas, library, and dirty state — editing one never touches another. The
-  workspace tree itself is shared across every open tab, not per-tab.
-  `File > Open Project... (.json)` is kept only for opening project files
-  saved by a version of this tool before `.ecd` existed; the format is
-  identical, so it opens into a tab exactly like a `.ecd` does.
+  immediately and opens as a new tab, with the top entity name defaulted to
+  the filename you gave it, e.g. `my_design.ecd` → `my_design`); double-click
+  an existing `.ecd` file (shown in bold blue in the tree) to open it, either
+  into a new tab or, if it's already open, by just switching to its existing
+  tab. Right-click an `.ecd` file for **Open** or **Export as VHDL** (opens
+  it first if it isn't already a tab, then runs the same first-export-only
+  save dialog described below). Several diagrams can be open side by side,
+  each in its own tab with its own undo-independent canvas, library, and
+  dirty state — editing one never touches another. The workspace tree itself
+  is shared across every open tab, not per-tab. `File > Open Project...
+  (.json)` is kept only for opening project files saved by a version of this
+  tool before `.ecd` existed; the format is identical, so it opens into a tab
+  exactly like a `.ecd` does.
 - **Missing source files are flagged, never silently dropped**: if an
   instantiated entity's source file goes missing (moved, deleted, an
   unmounted drive) since it was last read, every instance of it on the canvas

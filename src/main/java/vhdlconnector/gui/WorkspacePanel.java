@@ -33,6 +33,7 @@ public class WorkspacePanel extends JPanel {
         void onReloadRequested(File file);
         void onOpenDiagramRequested(File ecdFile);
         void onNewDiagramRequested(File targetFolder, String chosenFileName);
+        void onExportRequested(File ecdFile);
     }
 
     /** Sentinel child placed under every not-yet-expanded directory node so its expand arrow
@@ -196,7 +197,10 @@ public class WorkspacePanel extends JPanel {
         if (isDiagramFile(f)) {
             JMenuItem open = new JMenuItem("Open");
             open.addActionListener(a -> { if (listener != null) listener.onOpenDiagramRequested(f); });
+            JMenuItem export = new JMenuItem("Export as VHDL");
+            export.addActionListener(a -> { if (listener != null) listener.onExportRequested(f); });
             menu.add(open);
+            menu.add(export);
             return menu;
         }
         if (!isEntityFile(f)) return null;

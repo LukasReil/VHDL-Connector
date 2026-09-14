@@ -514,10 +514,28 @@ public class MainFrame extends JFrame implements WorkspacePanel.Listener {
         }
     }
 
+    /** "Export as VHDL" from the tree's .ecd context menu: opens (or switches to) that
+     *  diagram's tab first - if it's already open with unsaved changes, the freshly-loaded
+     *  copy is discarded in favor of the open tab (see openTab's dedup-by-file check), so
+     *  the in-memory version is always what actually gets exported - then runs the same
+     *  dialog-once-then-remember export flow the File menu uses. */
+    @Override
+    public void onExportRequested(File ecdFile) {
+        try {
+            Project project = projectIO.load(ecdFile);
+            openTab(project, ecdFile);
+        } catch (IOException | RuntimeException ex) {
+            JOptionPane.showMessageDialog(this, "Failed to open diagram:\n" + ex.getMessage(), "Export VHDL", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        exportVhdl();
+    }
+
     @Override
     public void onNewDiagramRequested(File targetFolder, String chosenFileName) {
         File target = new File(targetFolder, chosenFileName);
         Project project = new Project();
+        project.topEntityName = chosenFileName.substring(0, chosenFileName.length() - ".ecd".length());
         if (workspaceFolder != null) project.workspaceRoot = workspaceFolder.getAbsolutePath();
         try {
             projectIO.save(project, target);
