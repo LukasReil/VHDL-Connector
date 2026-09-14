@@ -11,25 +11,30 @@ small built-in reader/writer).
 
 ## Features
 
-- **Import VHDL entities** from `.vhd`/`.vhdl` files (or recursively from a
-  whole folder) — the entity name, generics, and ports are parsed straight out
-  of the `entity ... is ... end entity;` declaration. Re-importing over an
-  existing library entity (e.g. after fixing up the source) automatically
-  drops any connection left dangling by a port that got renamed or removed in
-  the process, rather than leaving a stale connection that can never be drawn
-  but still blocks a new wire to that pin.
-- **Import Vivado IP** from an IP folder (recursively, same as the VHDL folder
-  import): each core's `.vho` instantiation template — a `COMPONENT ... PORT
-  (...); END COMPONENT;` block plus a port-map template, as Vivado generates
-  next to a generated IP core — is parsed the same way a real entity would be.
-- **Reload Entity**: select a library entity and click **Reload Entity** to
-  re-parse it from its original source file in place, picking up port/generic
-  changes made outside the tool without having to re-import and re-wire
-  everything by hand. Existing instances of that entity keep their position,
-  label, and generic overrides (an override for a generic that no longer
-  exists after the reload is dropped); a connection left dangling by a port
-  that was renamed or removed is cleaned up the same way a re-import handles
-  it.
+- **Workspace folder**: **File > Open Workspace Folder...** opens a directory
+  as a browsable file tree in the left-hand panel (lazily loaded, so it works
+  fine on a large tree — a folder's contents aren't read until you expand it).
+  Every file is shown; nothing is filtered by convention or folder name, so
+  there's no separate "designate this as a source/IP folder" step and no risk
+  of something being hidden that you actually wanted — you just never
+  double-click into a `sim`/`tb` folder. Double-click a `.vhd`/`.vhdl` entity
+  file or a `.vho` IP instantiation template (or right-click it) to parse it
+  and place an instance on the canvas; a file declaring more than one
+  entity/component prompts you to pick which one to place. Right-click a file
+  for **Add to Canvas**, **View Entity** (preview without placing anything),
+  or **Reload from Disk** (re-parse it and swap it into the library under the
+  same name, in place — existing instances keep their position, label, and
+  generic overrides; an override for a generic that no longer exists after
+  the edit is dropped, and a connection left dangling by a renamed/removed
+  port is cleaned up automatically). Right-click a folder (including the
+  workspace root) for **Refresh**, to pick up files added/removed on disk.
+  The opened folder is remembered in the project file.
+- **Missing source files are flagged, never silently dropped**: if an
+  instantiated entity's source file goes missing (moved, deleted, an
+  unmounted drive) since it was last read, every instance of it on the canvas
+  gets a dashed red outline and a small warning glyph (hover for the missing
+  path) — but nothing about your wiring is touched. The warning clears again
+  on its own once the file is back.
 - **Canvas-based block design**: drag entities from the library onto the
   canvas, drag instances (and external ports) around, and connect ports by
   dragging from one pin to another. Wires are auto-routed at right angles
@@ -124,17 +129,18 @@ java -cp out vhdlconnector.Main
 
 ## Usage
 
-1. **File > Import VHDL File...** (or **Import VHDL Folder...** to recursively
-   pull in every `.vhd`/`.vhdl` file under a directory, or **Import IP
-   Folder...** to recursively pull in every `.vho` instantiation template
-   under a directory — e.g. Vivado's per-core `ip/<core>/<core>.vho` layout).
-   Parsed entities show up in the **Entity Library** panel on the left. If you
-   later edit an entity's source file outside this tool, select it in the
-   library and click **Reload Entity** to re-parse it in place instead of
-   re-importing and re-wiring it from scratch.
-2. Select an entity and click **Add to Canvas** (or double-click it) to place
-   an instance. Drag the instance around the canvas to position it — wires
-   attached to it reroute automatically around other instances.
+1. **File > Open Workspace Folder...** and pick the directory containing your
+   VHDL sources and Vivado IP (e.g. your project's repo root — everything
+   underneath is browsable, including simulation/testbench folders you simply
+   won't click into). Double-click a `.vhd`/`.vhdl` or `.vho` file in the
+   **Workspace** panel on the left (or right-click it and choose **Add to
+   Canvas**) to parse it and place an instance. If you later edit an entity's
+   source file outside this tool, right-click it in the tree and choose
+   **Reload from Disk** to re-parse it in place instead of re-wiring
+   everything from scratch.
+2. Instances placed this way can be dragged around the canvas to position
+   them — wires attached to an instance reroute automatically around other
+   instances.
 3. **Click an instance to select it; Ctrl+Click additional instances to build
    a multi-selection** (Ctrl+Click a selected instance again to deselect just
    that one). **Ctrl+C** copies the selection, **Ctrl+V** pastes it as new

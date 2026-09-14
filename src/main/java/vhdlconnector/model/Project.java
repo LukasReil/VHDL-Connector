@@ -13,6 +13,7 @@ public class Project {
     public List<Connection> connections = new ArrayList<>();
 
     public String projectFilePath; // where this project was last saved/loaded from, nullable
+    public String workspaceRoot;   // folder opened via "Open Workspace Folder...", nullable
 
     private int instanceCounter = 0;
     private int connectionCounter = 0;

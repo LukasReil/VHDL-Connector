@@ -20,6 +20,7 @@ public class ProjectIO {
         File projectDir = file.getAbsoluteFile().getParentFile();
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("topEntityName", project.topEntityName);
+        if (project.workspaceRoot != null) root.put("workspaceRoot", relativizeToProject(project.workspaceRoot, projectDir));
 
         List<Object> entities = new ArrayList<>();
         for (VhdlEntity e : project.library.values()) entities.add(entityToJson(e, projectDir));
@@ -48,6 +49,8 @@ public class ProjectIO {
 
         Project project = new Project();
         project.topEntityName = Json.str(root, "topEntityName", "top_design");
+        String storedWorkspaceRoot = (String) root.get("workspaceRoot");
+        project.workspaceRoot = storedWorkspaceRoot != null ? resolveAgainstProject(storedWorkspaceRoot, projectDir) : null;
 
         for (Object o : Json.arr(root.getOrDefault("library", new ArrayList<>()))) {
             VhdlEntity e = entityFromJson(Json.obj(o), projectDir);

@@ -19,13 +19,13 @@ import java.io.IOException;
 import java.util.List;
 import java.util.ArrayList;
 
-public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPanel.Listener {
+public class MainFrame extends JFrame implements WorkspacePanel.Listener, CanvasPanel.Listener {
 
     private Project project = new Project();
     private File currentProjectFile;
     private boolean dirty = false;
 
-    private final LibraryPanel libraryPanel = new LibraryPanel();
+    private final WorkspacePanel workspacePanel = new WorkspacePanel();
     private final CanvasPanel canvasPanel = new CanvasPanel();
     private final JLabel statusLabel = new JLabel(" ");
 
@@ -38,13 +38,13 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
         setSize(1200, 800);
         setLocationRelativeTo(null);
 
-        libraryPanel.setListener(this);
+        workspacePanel.setListener(this);
         canvasPanel.setListener(this);
         canvasPanel.setProject(project);
-        libraryPanel.refresh(project);
+        workspacePanel.setWorkspaceRoot(project.workspaceRoot != null ? new File(project.workspaceRoot) : null, project);
 
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, libraryPanel, new JScrollPane(canvasPanel));
-        split.setDividerLocation(220);
+        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, workspacePanel, new JScrollPane(canvasPanel));
+        split.setDividerLocation(260);
 
         setJMenuBar(buildMenuBar());
 
@@ -76,9 +76,7 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
         fileMenu.add(menuItem("Save Project", this::saveProject, KeyStroke.getKeyStroke(KeyEvent.VK_S, shortcutMask)));
         fileMenu.add(menuItem("Save Project As...", this::saveProjectAs, KeyStroke.getKeyStroke(KeyEvent.VK_S, shortcutMask | InputEvent.SHIFT_DOWN_MASK)));
         fileMenu.addSeparator();
-        fileMenu.add(menuItem("Import VHDL File...", this::importVhdlFiles));
-        fileMenu.add(menuItem("Import VHDL Folder...", this::importFolder));
-        fileMenu.add(menuItem("Import IP Folder...", this::importIpFolder));
+        fileMenu.add(menuItem("Open Workspace Folder...", this::openWorkspaceFolder));
         fileMenu.add(menuItem("Export VHDL...", this::exportVhdl));
         fileMenu.addSeparator();
         fileMenu.add(menuItem("Exit", this::exit));
@@ -111,7 +109,7 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
         currentProjectFile = null;
         dirty = false;
         canvasPanel.setProject(project);
-        libraryPanel.refresh(project);
+        workspacePanel.setWorkspaceRoot(null, project);
         updateTitle();
         status("New project created.");
     }
@@ -127,12 +125,30 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
             currentProjectFile = chooser.getSelectedFile();
             dirty = false;
             canvasPanel.setProject(project);
-            libraryPanel.refresh(project);
+            workspacePanel.setWorkspaceRoot(project.workspaceRoot != null ? new File(project.workspaceRoot) : null, project);
             updateTitle();
             status("Opened " + currentProjectFile.getName());
         } catch (IOException | RuntimeException ex) {
             JOptionPane.showMessageDialog(this, "Failed to open project:\n" + ex.getMessage(), "Open Project", JOptionPane.ERROR_MESSAGE);
         }
+    }
+
+    /** Opens a folder as the project's workspace: the left panel becomes a browsable file
+     *  tree rooted there (see WorkspacePanel), replacing the old up-front bulk import - the
+     *  user instantiates entities from it on demand instead of the whole folder being scanned
+     *  and parsed immediately. */
+    private void openWorkspaceFolder() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setDialogTitle("Open Workspace Folder");
+        if (project.workspaceRoot != null) chooser.setCurrentDirectory(new File(project.workspaceRoot));
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File folder = chooser.getSelectedFile();
+        project.workspaceRoot = folder.getAbsolutePath();
+        workspacePanel.setWorkspaceRoot(folder, project);
+        dirty = true;
+        updateTitle();
+        status("Opened workspace folder: " + folder.getAbsolutePath());
     }
 
     private void saveProject() {
@@ -165,106 +181,44 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
         }
     }
 
-    /** Recursively collects every file under folder whose name ends with one of the given
-     *  (lowercase) extensions. Shared by the VHDL-folder and IP-folder imports. */
-    private ArrayList<File> findFilesRecursively(File folder, String... lowerCaseExtensions) {
-        ArrayList<File> found = new ArrayList<>();
-        File[] files = folder.listFiles();
-        if (files == null) return found;
-        for (File f : files) {
-            if (f.isDirectory()) {
-                found.addAll(findFilesRecursively(f, lowerCaseExtensions));
-            } else {
-                String lower = f.getName().toLowerCase();
-                for (String ext : lowerCaseExtensions) {
-                    if (lower.endsWith(ext)) { found.add(f); break; }
-                }
+    /** Dispatches on extension the same way the old per-file importers did: a .vho is a
+     *  Vivado IP instantiation template (component declaration + port map template, not a
+     *  full entity - see VhdlEntityParser.parseVhoFile), anything else is parsed as a normal
+     *  entity declaration. */
+    private List<VhdlEntity> parseWorkspaceFile(File f) throws IOException {
+        return f.getName().toLowerCase().endsWith(".vho") ? parser.parseVhoFile(f) : parser.parseFile(f);
+    }
+
+    /** Merges freshly parsed entities into the library, prompting on a name collision with
+     *  an existing (presumably different) entity - same conflict handling the old bulk
+     *  importer used. Returns only the entities actually merged in (a declined overwrite is
+     *  left out). */
+    private List<VhdlEntity> mergeIntoLibrary(List<VhdlEntity> parsed) {
+        List<VhdlEntity> merged = new ArrayList<>();
+        for (VhdlEntity e : parsed) {
+            if (project.library.containsKey(e.name)) {
+                int choice = JOptionPane.showConfirmDialog(this,
+                        "Entity '" + e.name + "' already exists in the library. Overwrite it?",
+                        "Entity conflict", JOptionPane.YES_NO_OPTION);
+                if (choice != JOptionPane.YES_OPTION) continue;
             }
+            project.addEntity(e);
+            merged.add(e);
         }
-        return found;
+        return merged;
     }
 
-    private void importFolder() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        chooser.setDialogTitle("Select VHDL Folder");
-        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        File folder = chooser.getSelectedFile();
-        ArrayList<File> vhdlFiles = findFilesRecursively(folder, ".vhd", ".vhdl");
-        if (vhdlFiles.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "No VHDL files found in the selected folder.", "Import Folder", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        importFiles(vhdlFiles.toArray(new File[0]), parser::parseFile);
-    }
-
-    /** Recursively imports Vivado-generated IP: an "IP folder" contains one subfolder per
-     *  core, each with a .vho instantiation template (component declaration + port map
-     *  template) rather than a full entity declaration - see VhdlEntityParser.parseVhoFile. */
-    private void importIpFolder() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        chooser.setDialogTitle("Select IP Folder");
-        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        File folder = chooser.getSelectedFile();
-        ArrayList<File> vhoFiles = findFilesRecursively(folder, ".vho");
-        if (vhoFiles.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "No .vho instantiation templates found in the selected folder.", "Import IP Folder", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        importFiles(vhoFiles.toArray(new File[0]), parser::parseVhoFile);
-    }
-
-    private void importVhdlFiles() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setMultiSelectionEnabled(true);
-        chooser.setFileFilter(new FileNameExtensionFilter("VHDL Source (*.vhd, *.vhdl)", "vhd", "vhdl"));
-        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        importFiles(chooser.getSelectedFiles(), parser::parseFile);
-    }
-
-    private interface EntityFileParser {
-        List<VhdlEntity> parse(File f) throws IOException;
-    }
-
-    private void importFiles(File[] files, EntityFileParser fileParser) {
-        int imported = 0;
-        StringBuilder errors = new StringBuilder();
-        for (File f : files) {
-            try {
-                List<VhdlEntity> entities = fileParser.parse(f);
-                if (entities.isEmpty()) {
-                    errors.append(f.getName()).append(": no entity/component declaration found\n");
-                    continue;
-                }
-                for (VhdlEntity e : entities) {
-                    if (project.library.containsKey(e.name)) {
-                        int choice = JOptionPane.showConfirmDialog(this,
-                                "Entity '" + e.name + "' already exists in the library. Overwrite it?",
-                                "Entity conflict", JOptionPane.YES_NO_OPTION);
-                        if (choice != JOptionPane.YES_OPTION) continue;
-                    }
-                    project.addEntity(e);
-                    imported++;
-                }
-            } catch (IOException ex) {
-                errors.append(f.getName()).append(": ").append(ex.getMessage()).append('\n');
-            }
-        }
-        libraryPanel.refresh(project);
-        if (imported > 0) { dirty = true; updateTitle(); }
-        if (errors.length() > 0) {
-            JOptionPane.showMessageDialog(this, errors.toString(), "Import Warnings", JOptionPane.WARNING_MESSAGE);
-        }
-        status("Imported " + imported + " entity/entities.");
-        if (imported > 0) {
-            // an overwritten entity may have dropped or renamed a port that existing
-            // instances were wired to; this immediately cleans up any resulting stale
-            // connection (and reports it, taking over the status line above) instead of
-            // leaving it silently blocking a pin until some unrelated canvas action
-            // happens to trigger the same cleanup.
-            canvasPanel.layoutChanged();
-        }
+    /** If a file declared more than one entity/component, asks which one to act on next
+     *  (placing on canvas, or previewing). Returns null if the user cancelled. */
+    private VhdlEntity chooseEntity(List<VhdlEntity> candidates, String verb) {
+        if (candidates.size() == 1) return candidates.get(0);
+        String[] names = candidates.stream().map(e -> e.name).toArray(String[]::new);
+        String chosen = (String) JOptionPane.showInputDialog(this,
+                "This file declares multiple entities. Which one do you want to " + verb + "?",
+                "Select Entity", JOptionPane.QUESTION_MESSAGE, null, names, names[0]);
+        if (chosen == null) return null;
+        for (VhdlEntity e : candidates) if (e.name.equals(chosen)) return e;
+        return null;
     }
 
     private void exportVhdl() {
@@ -330,68 +284,91 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
         statusLabel.setText(msg);
     }
 
-    // ---------------- LibraryPanel.Listener ----------------
+    // ---------------- WorkspacePanel.Listener ----------------
 
     @Override
-    public void onImportRequested() {
-        importVhdlFiles();
-    }
-
-    @Override
-    public void onAddToCanvasRequested(String entityName) {
-        canvasPanel.addInstanceAtDefaultPosition(entityName);
-        dirty = true;
-        updateTitle();
-    }
-
-    @Override
-    public void onRemoveRequested(String entityName) {
-        boolean inUse = project.instances.stream().anyMatch(i -> i.entityName.equals(entityName));
-        if (inUse) {
-            int choice = JOptionPane.showConfirmDialog(this,
-                    "Entity '" + entityName + "' is used by one or more instances on the canvas.\n" +
-                            "Removing it will also delete those instances and their connections. Continue?",
-                    "Remove Entity", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-            if (choice != JOptionPane.YES_OPTION) return;
-            List<String> ids = project.instances.stream().filter(i -> i.entityName.equals(entityName))
-                    .map(i -> i.id).collect(java.util.stream.Collectors.toList());
-            for (String id : ids) project.removeInstance(id);
-        }
-        project.library.remove(entityName);
-        libraryPanel.refresh(project);
-        canvasPanel.layoutChanged();
-        dirty = true;
-        updateTitle();
-        status("Removed entity '" + entityName + "' from library.");
-    }
-
-    @Override
-    public void onViewRequested(String entityName) {
-        VhdlEntity e = project.library.get(entityName);
-        if (e != null) Dialogs.showEntitySummary(this, e);
-    }
-
-    @Override
-    public void onReloadRequested(String entityName) {
-        VhdlEntity old = project.library.get(entityName);
-        if (old == null) return;
-        if (old.sourceFile == null) {
-            JOptionPane.showMessageDialog(this,
-                    "Entity '" + entityName + "' has no known source file (it may have been loaded from " +
-                            "an older project file), so it cannot be reloaded.",
-                    "Cannot Reload", JOptionPane.WARNING_MESSAGE);
+    public void onAddToCanvasRequested(File file) {
+        List<VhdlEntity> parsed;
+        try {
+            parsed = parseWorkspaceFile(file);
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this, "Failed to parse " + file.getName() + ":\n" + ex.getMessage(),
+                    "Parse Error", JOptionPane.ERROR_MESSAGE);
             return;
         }
+        if (parsed.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "No entity/component declaration found in:\n" + file.getName(),
+                    "Add to Canvas", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        List<VhdlEntity> merged = mergeIntoLibrary(parsed);
+        if (merged.isEmpty()) {
+            status("No entity added from " + file.getName() + ".");
+            return;
+        }
+        workspacePanel.setProject(project);
+        dirty = true;
+        updateTitle();
+        VhdlEntity toPlace = chooseEntity(merged, "place");
+        if (toPlace == null) {
+            status("Merged " + merged.size() + " entit" + (merged.size() == 1 ? "y" : "ies") + " from "
+                    + file.getName() + " into the library; none placed.");
+            return;
+        }
+        canvasPanel.addInstanceAtDefaultPosition(toPlace.name);
+        status("Instantiated '" + toPlace.name + "' from " + file.getName() + ".");
+        // merging may have overwritten an existing entity with a different port set; this
+        // immediately cleans up any resulting stale connection on other instances of it
+        // (and reports it, taking over the status line above) rather than leaving it
+        // silently blocking a pin until some unrelated canvas action happens to trigger
+        // the same cleanup.
+        canvasPanel.layoutChanged();
+    }
+
+    @Override
+    public void onViewRequested(File file) {
+        List<VhdlEntity> parsed;
+        try {
+            parsed = parseWorkspaceFile(file);
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this, "Failed to parse " + file.getName() + ":\n" + ex.getMessage(),
+                    "Parse Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        if (parsed.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "No entity/component declaration found in:\n" + file.getName(),
+                    "View Entity", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        VhdlEntity toShow = chooseEntity(parsed, "view");
+        if (toShow != null) Dialogs.showEntitySummary(this, toShow);
+    }
+
+    @Override
+    public void onReloadRequested(File file) {
+        String abs = file.getAbsolutePath();
+        VhdlEntity old = null;
+        for (VhdlEntity e : project.library.values()) {
+            if (abs.equals(e.sourceFile)) { old = e; break; }
+        }
+        if (old == null) return; // "Reload from Disk" is disabled in this case; nothing to do
+        reloadEntityFromDisk(old);
+    }
+
+    /** Re-parses an already-in-the-library entity from its recorded source file and swaps it
+     *  in under the same name, so existing instances keep their position, label, and generic
+     *  overrides (an override for a generic that no longer exists after the edit is dropped).
+     *  Used by "Reload from Disk" in the workspace tree's context menu. */
+    private void reloadEntityFromDisk(VhdlEntity old) {
+        String entityName = old.name;
         File f = new File(old.sourceFile);
         if (!f.isFile()) {
-            JOptionPane.showMessageDialog(this,
-                    "Source file no longer exists:\n" + old.sourceFile,
+            JOptionPane.showMessageDialog(this, "Source file no longer exists:\n" + old.sourceFile,
                     "Cannot Reload", JOptionPane.WARNING_MESSAGE);
             return;
         }
         try {
-            boolean isVho = f.getName().toLowerCase().endsWith(".vho");
-            List<VhdlEntity> parsed = isVho ? parser.parseVhoFile(f) : parser.parseFile(f);
+            List<VhdlEntity> parsed = parseWorkspaceFile(f);
             VhdlEntity reloaded = null;
             for (VhdlEntity e : parsed) {
                 if (e.name.equalsIgnoreCase(entityName)) { reloaded = e; break; }
@@ -410,13 +387,13 @@ public class MainFrame extends JFrame implements LibraryPanel.Listener, CanvasPa
                     inst.genericOverrides.keySet().removeIf(key -> newEntity.getGeneric(key) == null);
                 }
             }
-            libraryPanel.refresh(project);
+            workspacePanel.setProject(project);
             dirty = true;
             updateTitle();
             status("Reloaded entity '" + entityName + "' from " + f.getName() + ".");
             // a reload may have dropped or renamed a port that existing instances were
             // wired to; this immediately cleans up any resulting stale connection (and
-            // reports it, taking over the status line above) the same way importFiles() does.
+            // reports it, taking over the status line above) the same way a fresh merge does.
             canvasPanel.layoutChanged();
         } catch (IOException ex) {
             JOptionPane.showMessageDialog(this,

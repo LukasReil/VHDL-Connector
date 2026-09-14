@@ -5,6 +5,7 @@ import vhdlconnector.model.*;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.io.File;
 import java.awt.geom.Line2D;
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
@@ -35,6 +36,14 @@ public class CanvasPanel extends JPanel {
     private Listener listener;
     private final Map<String, List<Point2D>> routedPaths = new java.util.HashMap<>(); // connection id -> routed polyline
     private final List<Connection> visualConnections = new ArrayList<>(); // one representative per drawn wire (a whole AXI-Stream bundle collapses to one)
+
+    // Entity names whose sourceFile no longer exists on disk, as of the last layoutChanged()/
+    // recomputeRoutes() pass - checked there (not on every paint, which would mean a stat()
+    // per instance per repaint, including during drag) so it's a plain cached lookup here.
+    // Deliberately never used to prune anything - a missing file just gets flagged so the user
+    // notices, per an explicit decision that disk hiccups (an unmounted drive, a rename in
+    // progress) must never silently delete wiring.
+    private final java.util.Set<String> missingSourceEntities = new java.util.HashSet<>();
 
     // drag state
     private Instance draggingInstance;
@@ -94,6 +103,13 @@ public class CanvasPanel extends JPanel {
                 sb.append(en.getValue().name).append(" (").append(en.getValue().direction.vhdl()).append(")<br>");
             }
             return sb.append("</html>").toString();
+        }
+        Instance inst = hitTestInstance(e.getPoint());
+        if (inst != null) {
+            VhdlEntity ent = project.getEntityForInstance(inst);
+            if (ent != null && missingSourceEntities.contains(ent.name)) {
+                return "<html>Source file missing:<br>" + ent.sourceFile + "</html>";
+            }
         }
         return null;
     }
@@ -161,7 +177,12 @@ public class CanvasPanel extends JPanel {
     private void recomputeRoutes(Rectangle2D bounds) {
         routedPaths.clear();
         visualConnections.clear();
+        missingSourceEntities.clear();
         if (project == null) return;
+
+        for (VhdlEntity e : project.library.values()) {
+            if (e.sourceFile != null && !new File(e.sourceFile).isFile()) missingSourceEntities.add(e.name);
+        }
 
         int deduped = project.deduplicateConnectionIds();
         int pruned = project.pruneOrphanedConnections();
@@ -630,9 +651,15 @@ public class CanvasPanel extends JPanel {
 
     private void drawInstance(Graphics2D g2, InstanceBox box) {
         boolean sel = selectedInstances.contains(box.inst);
+        boolean missingSource = box.entity != null && missingSourceEntities.contains(box.entity.name);
         RoundRectangle2DHelper.fillRoundRect(g2, box.x, box.y, box.width, box.height, 8, new Color(214, 226, 245));
-        g2.setColor(sel ? new Color(40, 110, 210) : new Color(120, 135, 160));
-        g2.setStroke(new BasicStroke(sel ? 2.2f : 1.2f));
+        if (missingSource) {
+            g2.setColor(new Color(200, 60, 40));
+            g2.setStroke(new BasicStroke(sel ? 2.2f : 1.6f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND, 1, new float[]{5, 4}, 0));
+        } else {
+            g2.setColor(sel ? new Color(40, 110, 210) : new Color(120, 135, 160));
+            g2.setStroke(new BasicStroke(sel ? 2.2f : 1.2f));
+        }
         g2.drawRoundRect((int) box.x, (int) box.y, (int) box.width, (int) box.height, 8, 8);
 
         g2.setColor(new Color(60, 90, 150));
@@ -647,6 +674,23 @@ public class CanvasPanel extends JPanel {
         String sub = box.entity != null ? "(" + box.entity.name + ")" : "(missing entity!)";
         g2.drawString(sub, (int) (box.x + 8), (int) (box.y + 28));
         g2.setFont(oldFont);
+
+        if (missingSource) {
+            double gx = box.x + box.width - 18, gy = box.y + HEADER_HEIGHT / 2.0;
+            g2.setColor(new Color(230, 190, 30));
+            java.awt.geom.GeneralPath tri = new java.awt.geom.GeneralPath();
+            tri.moveTo(gx, gy - 8);
+            tri.lineTo(gx + 7, gy + 6);
+            tri.lineTo(gx - 7, gy + 6);
+            tri.closePath();
+            g2.fill(tri);
+            g2.setColor(new Color(90, 70, 0));
+            g2.setStroke(new BasicStroke(1f));
+            g2.draw(tri);
+            g2.setFont(oldFont.deriveFont(Font.BOLD, 10f));
+            g2.drawString("!", (float) gx - 2, (float) gy + 4);
+            g2.setFont(oldFont);
+        }
 
         g2.setFont(oldFont.deriveFont(Font.BOLD, 11f));
         for (PinInfo pin : box.leftPins) {
